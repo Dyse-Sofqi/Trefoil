@@ -2,7 +2,7 @@
  * Trefoil —— Obsidian 白板插件入口（Obsidian 插件层）。
  * 职责：视图注册、Ribbon 入口、命令面板命令、文件菜单、插件设置。
  */
-import { Menu, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, getIcon } from 'obsidian';
+import { Menu, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, getIcon, requireApiVersion } from 'obsidian';
 import { VIEW_TYPE_TREFOIL, TrefoilView } from './obsidian/TrefoilView';
 import { createEmptyDocJson } from './data/jsonCanvas';
 import { ErrorLogger } from './obsidian/errorLog';
@@ -185,7 +185,7 @@ export default class TrefoilPlugin extends Plugin {
     for (const leaf of existing) {
       const st = leaf.getViewState().state as Partial<TrefoilState> | undefined;
       if (st?.file === file.path) {
-        await this.app.workspace.revealLeaf(leaf);
+        await this.revealLeafCompat(leaf);
         return;
       }
     }
@@ -196,7 +196,20 @@ export default class TrefoilPlugin extends Plugin {
       leaf = this.app.workspace.getLeaf(true);
       await leaf.setViewState({ type: VIEW_TYPE_TREFOIL, state });
     }
-    await this.app.workspace.revealLeaf(leaf);
+    await this.revealLeafCompat(leaf);
+  }
+
+  /**
+   * 把叶子带到前台并确保视图已加载。
+   * revealLeaf 自 Obsidian 1.7.2 才提供（1.7.2 的延迟视图需要它强制加载），
+   * 旧版本退回 setActiveLeaf，与 manifest 声明的 minAppVersion 1.5.0 保持一致。
+   */
+  private async revealLeafCompat(leaf: WorkspaceLeaf): Promise<void> {
+    if (requireApiVersion('1.7.2')) {
+      await this.app.workspace.revealLeaf(leaf);
+      return;
+    }
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
   }
 
   private rethemeViews(): void {

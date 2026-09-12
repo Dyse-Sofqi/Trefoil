@@ -88,6 +88,8 @@
   .trefoil-canvas-host {
     position: absolute;
     inset: 0;
+    /* 数位板笔/触摸拖动默认会被浏览器接管为滚动手势（触发 pointercancel 中断笔迹），必须声明为应用自管 */
+    touch-action: none;
   }
   .trefoil-loading {
     position: absolute;

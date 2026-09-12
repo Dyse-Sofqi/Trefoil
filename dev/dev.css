@@ -28,3 +28,36 @@ textarea:focus {
   border-color: var(--interactive-accent);
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
+
+/* 深色主题（?theme=dark）：覆盖上方 :root 变量，故必须排在后面 */
+.theme-dark {
+  --trefoil-canvas-bg: #1e1e22;
+  --text-normal: #e6e6e6;
+  --text-muted: #9a9a9a;
+  --text-faint: #6f6f6f;
+  --background-primary: #252528;
+  --background-modifier-border: #3c3c40;
+  --background-modifier-hover: #333338;
+  --interactive-accent: #5f8eff;
+}
+
+/* 轻提示（DevAdapter.toast 创建，2.2s 后淡出） */
+.trefoil-dev-toast {
+  position: fixed;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: #333;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  transition: opacity 0.3s;
+  opacity: 1;
+}
+
+.trefoil-dev-toast--hiding {
+  opacity: 0;
+}

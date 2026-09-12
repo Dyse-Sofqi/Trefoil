@@ -4,3 +4,12 @@
 .view-content.trefoil-view {
   padding: 0 !important;
 }
+
+/* 系统剪贴板写入用的临时宿主：移出视口且不可见（同步写入后立即移除） */
+.trefoil-clipboard-host {
+  position: fixed;
+  left: -9999px;
+  top: 0;
+  opacity: 0;
+  pointer-events: none;
+}

@@ -57,7 +57,8 @@ export function isOwnClipboardText(text: string): boolean {
 export function writeNodesToSystemClipboard(data: CanvasDoc): void {
   const plain = nodesToPlainText(data);
   lastWrittenText = plain;
-  const marker = `<div ${MARKER_ATTR}="${toBase64(JSON.stringify(data))}"></div>`;
+  const encodedNodes = toBase64(JSON.stringify(data));
+  const marker = `<div ${MARKER_ATTR}="${encodedNodes}"></div>`;
   const body = plain
     .split('\n')
     .map((t) => `<p>${escapeHtml(t)}</p>`)
@@ -66,7 +67,7 @@ export function writeNodesToSystemClipboard(data: CanvasDoc): void {
   const html = marker + body;
   // 先用 execCommand（同步、无需权限，保证纯文本一定写进去），
   // 再用异步 API 写入同一份内容以带上 HTML 标记（属性会被 DOM 复制清洗掉，异步路径才能保留）
-  writeViaExecCommand(html);
+  writeViaExecCommand(buildCopyHost(encodedNodes, plain));
   void writeViaAsyncClipboard(html, plain);
 }
 
@@ -74,15 +75,27 @@ function escapeHtml(text: string): string {
   return text.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c] ?? c);
 }
 
+/** execCommand 用的临时宿主：逐节点构造，不经 innerHTML 拼接，转义交给 DOM */
+function buildCopyHost(encodedNodes: string, plain: string): HTMLElement {
+  const host = document.createElement('div');
+  host.setAttribute('contenteditable', 'true');
+  host.classList.add('trefoil-clipboard-host');
+  const marker = document.createElement('div');
+  marker.setAttribute(MARKER_ATTR, encodedNodes);
+  host.appendChild(marker);
+  for (const line of plain.split('\n')) {
+    const p = document.createElement('p');
+    p.textContent = line;
+    host.appendChild(p);
+  }
+  return host;
+}
+
 /**
  * 用 execCommand 写剪贴板：同步、无需权限，Obsidian（Electron）里同样可用；
  * 异步 ClipboardItem 常被宿主权限/文档聚焦限制挡掉，只作备选。
  */
-function writeViaExecCommand(html: string): boolean {
-  const host = document.createElement('div');
-  host.setAttribute('contenteditable', 'true');
-  host.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
-  host.innerHTML = html;
+function writeViaExecCommand(host: HTMLElement): boolean {
   document.body.appendChild(host);
   const sel = window.getSelection();
   const saved = sel && sel.rangeCount ? sel.getRangeAt(0) : null;

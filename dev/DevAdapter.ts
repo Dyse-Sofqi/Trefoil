@@ -29,17 +29,8 @@ export class DevAdapter implements HostAdapter {
 
   palette(): ReturnType<typeof readPalette> {
     const dark = new URLSearchParams(location.search).get('theme') === 'dark';
-    if (dark) {
-      document.documentElement.style.setProperty('--trefoil-canvas-bg', '#1e1e22');
-      document.documentElement.style.setProperty('--text-normal', '#e6e6e6');
-      document.documentElement.style.setProperty('--text-muted', '#9a9a9a');
-      document.documentElement.style.setProperty('--text-faint', '#6f6f6f');
-      document.documentElement.style.setProperty('--background-primary', '#252528');
-      document.documentElement.style.setProperty('--background-modifier-border', '#3c3c40');
-      document.documentElement.style.setProperty('--background-modifier-hover', '#333338');
-      document.documentElement.style.setProperty('--interactive-accent', '#5f8eff');
-      return { ...readPalette(document.documentElement), canvasBg: '#1e1e22', text: '#e6e6e6' };
-    }
+    // 深色变量定义在 dev.css 的 .theme-dark 下，靠 class 切换（避免逐个内联赋值）
+    document.documentElement.classList.toggle('theme-dark', dark);
     return readPalette(document.documentElement);
   }
 
@@ -53,11 +44,10 @@ export class DevAdapter implements HostAdapter {
   toast(msg: string): void {
     const el = document.createElement('div');
     el.textContent = msg;
-    el.style.cssText =
-      'position:fixed;bottom:44px;left:50%;transform:translateX(-50%);z-index:9999;background:#333;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,.3);transition:opacity .3s;opacity:1;';
+    el.classList.add('trefoil-dev-toast');
     document.body.appendChild(el);
     setTimeout(() => {
-      el.style.opacity = '0';
+      el.classList.add('trefoil-dev-toast--hiding');
       setTimeout(() => el.remove(), 400);
     }, 2200);
   }

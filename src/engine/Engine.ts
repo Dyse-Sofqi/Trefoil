@@ -99,8 +99,6 @@ export class Engine {
     fileUrlResolver: FileUrlResolver | null = null,
   ) {
     this.containerEl = container;
-    // 数位板笔/触摸拖动默认会被浏览器接管为滚动手势（触发 pointercancel 中断笔迹），必须声明为应用自管
-    container.style.touchAction = 'none';
     this.doc = doc;
     this.palette = palette;
     // 必须在首次 render 之前就位：NodeView 构造时即用它解析 file 节点 URL
