@@ -1,0 +1,6 @@
+/* Trefoil 全局样式（随插件 styles.css 注入 Obsidian） */
+
+/* 画布视图内容区：清除宿主/主题施加的内边距（画布底部空白底条），让画布铺满整个叶子 */
+.view-content.trefoil-view {
+  padding: 0 !important;
+}

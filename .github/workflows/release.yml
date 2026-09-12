@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build plugin
+        run: pnpm build
+        env:
+          # CI 环境没有 Obsidian 测试库，跳过构建后的自动同步
+          TREFOIL_NO_DEPLOY: '1'
+
+      - name: Assemble release assets
+        run: pnpm package
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "build/release/trefoil-$GITHUB_REF_NAME/main.js" \
+            "build/release/trefoil-$GITHUB_REF_NAME/manifest.json" \
+            "build/release/trefoil-$GITHUB_REF_NAME/styles.css" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

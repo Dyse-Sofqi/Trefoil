@@ -1,0 +1,15 @@
+node_modules/
+dist/
+build/
+*.log
+.DS_Store
+test-vault/
+.vite/
+
+# AI 助手元数据（不入库）
+.workbuddy-ai/
+.agents/
+.claude/
+
+# 误由环境变量展开产生的目录（如 %SystemDrive%\ProgramData）
+%SystemDrive%/
