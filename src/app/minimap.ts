@@ -6,6 +6,7 @@ import type { CanvasNode } from '../core/types';
 import { isContainerNode, isFileNode, isLineLike, isShapeNode } from '../core/types';
 import { resolveColor, type Palette } from '../engine/palette';
 import { unionRect, type Rect } from '../core/geometry';
+import { CONTAINER_DEFAULT_FILL_OPACITY } from '../core/defaults';
 
 /** 缩略图画布逻辑尺寸（CSS px） */
 export const MINIMAP_W = 176;
@@ -88,6 +89,14 @@ export interface MiniNodePaint {
  */
 export function miniNodePaint(n: CanvasNode, palette: Palette): MiniNodePaint {
   if (isContainerNode(n)) {
+    // 设了背景色 → 按背景色实心块（透明度跟随容器背景透明度）；否则维持虚线描边。
+    // 缩略图是导航用的：容器默认背景透明度只有 10%，严格按比例画会几乎看不见，
+    // 因此给一个可见度下限（与「文本节点用半透明块代表文字」是同一取舍）。
+    const containerFill = resolveColor(n.fill, palette);
+    if (containerFill) {
+      const fo = Math.min(1, Math.max(0, n.fillOpacity ?? CONTAINER_DEFAULT_FILL_OPACITY));
+      return { color: containerFill, alpha: Math.max(0.35, 0.9 * fo), outline: false, dashed: false };
+    }
     return { color: palette.containerBorder, alpha: 0.9, outline: true, dashed: true };
   }
   if (isLineLike(n)) {
@@ -101,6 +110,12 @@ export function miniNodePaint(n: CanvasNode, palette: Palette): MiniNodePaint {
   if (isFileNode(n)) {
     return { color: palette.accent, alpha: 0.45, outline: false, dashed: false };
   }
-  // 文本与未知类型：半透明实心块，反映排版密度
+  // 文本节点：有背景按背景色实心显示（卡片感）；开了实体边框按边框色描边框（虚线/点状在缩略图上统一用虚线）；
+  // 其余半透明实心块，反映排版密度
+  const textFill = resolveColor(n.fill, palette);
+  if (textFill) return { color: textFill, alpha: 0.9, outline: false, dashed: false };
+  if (n.border) {
+    return { color: resolveColor(n.stroke, palette) ?? palette.nodeStroke, alpha: 0.9, outline: true, dashed: n.borderStyle !== 'solid' };
+  }
   return { color: palette.text, alpha: 0.3, outline: false, dashed: false };
 }

@@ -1,11 +1,20 @@
 <script lang="ts">
   import type { CanvasApp } from './CanvasApp';
   import { ui } from './ui.svelte';
+  import { settings } from './ui.svelte';
   import { icon } from './icons';
 
   let { app }: { app: CanvasApp } = $props();
 
   const modeLabel = $derived(ui.viewMode === 'normal' ? '正常' : ui.viewMode === 'browse' ? '浏览（只读）' : '聚焦');
+
+  /** 主题三态：日间 / 夜间 / 跟随系统（点击循环切换） */
+  const themeMeta = $derived.by(() => {
+    const t = settings.theme;
+    if (t === 'light') return { icon: 'sun', label: '日间模式（点击切换）' };
+    if (t === 'dark') return { icon: 'moon', label: '夜间模式（点击切换）' };
+    return { icon: 'monitor', label: '跟随系统主题（点击切换）' };
+  });
 
   let menuOpen = $state(false);
 
@@ -66,6 +75,15 @@
     缩放 {Math.round(ui.zoom * 100)}%
   </button>
   <span class="trefoil-status-item">{ui.elementCount} 元素</span>
+  <button
+    type="button"
+    class="trefoil-status-icon-btn"
+    title={themeMeta.label}
+    aria-label={themeMeta.label}
+    onclick={() => app.cycleTheme()}
+  >
+    {@html icon(themeMeta.icon)}
+  </button>
   {#if ui.selectionCount > 0}
     <span class="trefoil-status-item sel">已选 {ui.selectionCount}</span>
   {/if}

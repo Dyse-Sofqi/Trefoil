@@ -3,11 +3,15 @@
  * PNG 走 Konva 舞台快照；SVG 由数据模型直接序列化（几何精确、文本保真）。
  */
 import type { CanvasApp } from './app/CanvasApp';
-import { unionRect, sideAnchor, inferSides, bezierPath, type Rect } from './core/geometry';
+import { unionRect, sideAnchor, inferSides, bezierPath, mindmapEdgeCurve, type Rect } from './core/geometry';
 import { isContainerNode, isFileNode, isShapeNode, isTextNode, type CanvasEdge, type CanvasNode } from './core/types';
+import { paintOrder } from './core/zorder';
+import { CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from './core/defaults';
 import { canvasFont, fontVerticalMetrics, layoutText } from './engine/textMeasure';
 import { resolveColor, type Palette } from './engine/palette';
 import { pointsOf } from './engine/NodeView';
+import { arrowHeadParts } from './engine/arrowHead';
+import { arrowCurve } from './core/arrowLink';
 
 export interface ExportOptions {
   transparent: boolean;
@@ -107,9 +111,9 @@ export async function exportSvg(app: CanvasApp): Promise<string | null> {
     if (!from || !to || engine.isNodeHidden(e.fromNode) || engine.isNodeHidden(e.toNode)) continue;
     parts.push(edgeToSvg(e, from, to, palette));
   }
-  for (const n of app.doc.nodes) {
+  for (const n of paintOrder(app.doc.nodes)) {
     if (engine.erasedIds.has(n.id) || engine.isNodeHidden(n.id)) continue;
-    parts.push(nodeToSvg(n, { palette, getImageUrl: (raw) => imageData.get(raw) ?? null }));
+    parts.push(nodeToSvg(n, { palette, getImageUrl: (raw) => imageData.get(raw) ?? null, getNode: (id) => app.doc.getNode(id) }));
   }
 
   return [
@@ -138,11 +142,29 @@ async function fetchAsDataUrl(url: string): Promise<string | null> {
   }
 }
 
-function nodeToSvg(n: CanvasNode, engine: { palette: Palette; getImageUrl?(raw: string): string | null }): string {
+function nodeToSvg(
+  n: CanvasNode,
+  engine: { palette: Palette; getImageUrl?(raw: string): string | null; getNode?(id: string): CanvasNode | undefined },
+): string {
   const palette = engine.palette;
   const opacity = n.opacity !== undefined && n.opacity !== 1 ? ` opacity="${num(n.opacity)}"` : '';
   if (isContainerNode(n)) {
-    return `<rect x="${num(n.x)}" y="${num(n.y)}" width="${num(n.width)}" height="${num(n.height)}" fill="none" stroke="${palette.containerBorder}" stroke-width="1.5" stroke-dasharray="7 5"${opacity}/>`;
+    // 与画布渲染一致：先铺背景（透明度 = 节点 opacity × fillOpacity），再压虚线边框（0.85 × 节点 opacity）。
+    // 圆角与背景透明度未显式设置时走容器默认值（见 core/defaults）。
+    const alpha = n.opacity ?? 1;
+    const radius = Math.max(0, n.borderRadius ?? CONTAINER_DEFAULT_RADIUS);
+    const box = `x="${num(n.x)}" y="${num(n.y)}" width="${num(n.width)}" height="${num(n.height)}" rx="${num(radius)}"`;
+    const out: string[] = [];
+    const fill = n.fill ? (resolveColor(n.fill, palette) ?? null) : null;
+    if (fill) {
+      const a = alpha * Math.min(1, Math.max(0, n.fillOpacity ?? CONTAINER_DEFAULT_FILL_OPACITY));
+      out.push(`<rect ${box} fill="${fill}"${a < 1 ? ` opacity="${num(a)}"` : ''}/>`);
+    }
+    const borderAlpha = alpha * 0.85;
+    out.push(
+      `<rect ${box} fill="none" stroke="${palette.containerBorder}" stroke-width="1.5" stroke-dasharray="7 5"${borderAlpha < 1 ? ` opacity="${num(borderAlpha)}"` : ''}/>`,
+    );
+    return out.join('');
   }
   if (isTextNode(n)) {
     return textToSvg(n, palette, opacity);
@@ -151,7 +173,7 @@ function nodeToSvg(n: CanvasNode, engine: { palette: Palette; getImageUrl?(raw: 
     return fileToSvg(n, engine, opacity);
   }
   if (isShapeNode(n)) {
-    return shapeToSvg(n, palette, opacity);
+    return shapeToSvg(n, palette, opacity, engine.getNode);
   }
   return '';
 }
@@ -170,7 +192,16 @@ function fileToSvg(n: CanvasNode, engine: { palette: Palette; getImageUrl?(raw: 
       : '';
   const wrap = (body: string): string => (flipT ? `<g${flipT}>${body}</g>` : body);
   if (url && /^data:/i.test(url)) {
-    return wrap(`<image x="${x}" y="${y}" width="${w}" height="${h}" href="${esc(url)}" preserveAspectRatio="xMidYMid slice"${opacity}/>`);
+    const cap = (n.caption !== undefined ? n.caption : (n.file ?? '').split('/').pop()?.replace(/\.[^.]+$/, '') ?? '').trim();
+    let capSvg = '';
+    if (cap) {
+      // x/y/w/h 已是格式化字符串：运算时转回数字
+      const capW = cap.length * 13 * 0.6 + 8;
+      const capX = Number(x) + Number(w) / 2 - capW / 2;
+      const capY = Number(y) + Number(h) + 4;
+      capSvg = `<rect x="${num(capX)}" y="${num(capY)}" width="${num(capW)}" height="20" rx="4" fill="${engine.palette.canvasBg}" opacity="0.92"/><text x="${num(capX + capW / 2)}" y="${num(capY + 14)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="${engine.palette.text}"${opacity}>${esc(cap)}</text>`;
+    }
+    return wrap(`<image x="${x}" y="${y}" width="${w}" height="${h}" href="${esc(url)}" preserveAspectRatio="xMidYMid slice"${opacity}/>` + capSvg);
   }
   return wrap(
     `<g${opacity}><rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${engine.palette.canvasBg}" stroke="${engine.palette.textMuted}" stroke-width="1" stroke-dasharray="4 4"/>` +
@@ -195,6 +226,28 @@ function textToSvg(
   const baseline = layout.lineHeight / 2 - vm.inkCenterOffset + vm.baselineOffset;
   let y = startY;
   const out: string[] = [];
+  // 背景/实体边框：与画布渲染同一几何 —— 开边框时内缩线宽一半、圆角夹取到框内可达最大值，先画（压在文字下方）
+  const bw = n.border ? Math.max(1, Math.min(n.strokeSize ?? 2, n.width, n.height)) : 0;
+  const inset = bw / 2;
+  const frameR = Math.min(Math.max(0, n.borderRadius ?? 0), Math.max(0, Math.min(n.width, n.height) / 2 - inset));
+  const fx = num(n.x + inset);
+  const fy = num(n.y + inset);
+  const fw = num(Math.max(0, n.width - bw));
+  const fh = num(Math.max(0, n.height - bw));
+  if (n.fill) {
+    const fill = resolveColor(n.fill, palette) ?? 'none';
+    out.push(`<rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" rx="${num(frameR)}" fill="${fill}"${opacity}/>`);
+  }
+  if (n.border) {
+    const stroke = resolveColor(n.stroke, palette) ?? palette.nodeStroke;
+    const dash =
+      n.borderStyle === 'dashed'
+        ? ` stroke-dasharray="${num(bw * 4)} ${num(bw * 3)}"`
+        : n.borderStyle === 'dotted'
+          ? ` stroke-dasharray="0.01 ${num(bw * 1.9)}" stroke-linecap="round"`
+          : '';
+    out.push(`<rect x="${fx}" y="${fy}" width="${fw}" height="${fh}" rx="${num(frameR)}" fill="none" stroke="${stroke}" stroke-width="${num(bw)}"${dash}${opacity}/>`);
+  }
   for (const line of layout.lines) {
     const lineX =
       align === 'left' || align === 'justify'
@@ -226,7 +279,7 @@ function textToSvg(
   return out.join('\n');
 }
 
-function shapeToSvg(n: CanvasNode, palette: Palette, opacity: string): string {
+function shapeToSvg(n: CanvasNode, palette: Palette, opacity: string, getNode?: (id: string) => CanvasNode | undefined): string {
   const stroke = resolveColor(n.stroke, palette) ?? palette.nodeStroke;
   const sw = n.strokeSize ?? 2;
   const fill = n.fill ? resolveColor(n.fill, palette) ?? 'none' : 'none';
@@ -253,25 +306,82 @@ function shapeToSvg(n: CanvasNode, palette: Palette, opacity: string): string {
     case 'rect':
       return wrap(`<rect x="${num(x)}" y="${num(y)}" width="${num(w)}" height="${num(h)}" fill="${fill}"${common}/>`);
     case 'line':
-    case 'polyline': {
-      const pts = pointsOf(n)
-        .map(([px, py]) => `${num(x + px)},${num(y + py)}`)
-        .join(' ');
-      return wrap(`<polyline points="${pts}" fill="none"${common} stroke-linecap="round" stroke-linejoin="round"/>`);
-    }
+    case 'polyline':
     case 'arrow': {
+      // 双端绑定：与画布渲染同款的三次贝塞尔（端点样式仍生效，切线方向放端点）
+      if (getNode && n.fromNode && n.toNode) {
+        const bg = palette.canvasBg;
+        const curve = arrowCurve(n, getNode);
+        if (curve) {
+          const [cx1x, cx1y, cx2x, cx2y] = [curve.path[2]!, curve.path[3]!, curve.path[4]!, curve.path[5]!];
+          const ax = curve.path[0]!, ay = curve.path[1]!, bx = curve.path[6]!, by = curve.path[7]!;
+          const d = `M ${num(ax)} ${num(ay)} C ${num(cx1x)} ${num(cx1y)}, ${num(cx2x)} ${num(cx2y)}, ${num(bx)} ${num(by)}`;
+          const headSvgC = (style: string, from: readonly number[], to: readonly number[]): string => {
+            const partsH = arrowHeadParts({ x: from[0]!, y: from[1]! }, { x: to[0]!, y: to[1]! }, sw, style as never);
+            if (!partsH) return '';
+            if (partsH.triangle) {
+              const pts3 = partsH.triangle.map((v) => num(v)).join(',');
+              return partsH.hollowFill
+                ? `<polygon points="${pts3}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
+                : `<polygon points="${pts3}" fill="${stroke}"${opacity}/>`;
+            }
+            if (partsH.chevron) {
+              const vp = partsH.chevron.map((v) => num(v)).join(' ');
+              return `<polyline points="${vp}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${opacity}/>`;
+            }
+            if (partsH.circle) {
+              const c = partsH.circle;
+              return partsH.hollowFill
+                ? `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
+                : `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${stroke}"${opacity}/>`;
+            }
+            return '';
+          };
+          const headStyleS = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
+          const tailStyleS = n.tailStyle ?? 'none';
+          return wrap(
+            `<path d="${d}" fill="none"${common} stroke-linecap="round"/>` +
+              (tailStyleS !== 'none' ? headSvgC(tailStyleS, [curve.path[2]!, curve.path[3]!], [ax, ay]) : '') +
+              (headStyleS !== 'none' ? headSvgC(headStyleS, [cx2x, cx2y], [bx, by]) : ''),
+          );
+        }
+      }
       const pts = pointsOf(n).map(([px, py]) => ({ x: x + px, y: y + py }));
-      const ptsStr = pts.map((p) => `${num(p.x)},${num(p.y)}`).join(' ');
-      const [p1, p2] = [pts[pts.length - 2], pts[pts.length - 1]];
-      const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-      const len = Math.max(10, sw * 3.5);
-      const spread = 0.42;
-      const head = [
-        `${num(p2.x)},${num(p2.y)}`,
-        `${num(p2.x - len * Math.cos(ang - spread))},${num(p2.y - len * Math.sin(ang - spread))}`,
-        `${num(p2.x - len * Math.cos(ang + spread))},${num(p2.y - len * Math.sin(ang + spread))}`,
-      ].join(' ');
-      return wrap(`<polyline points="${ptsStr}" fill="none"${common} stroke-linecap="round"/><polygon points="${head}" fill="${stroke}"${opacity}/>`);
+      // 端点样式与画布渲染一致（arrow 缺省实心终点）；两端回缩后再画端点
+      const head = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
+      const tail = n.tailStyle ?? 'none';
+      const headParts = arrowHeadParts(pts[pts.length - 2]!, pts[pts.length - 1]!, sw, head);
+      const tailParts = pts.length >= 2 ? arrowHeadParts(pts[1]!, pts[0]!, sw, tail) : null;
+      const shaft = pts.map((p, i) =>
+        i === 0 && tailParts ? tailParts.shaftEnd : i === pts.length - 1 && headParts ? headParts.shaftEnd : p,
+      );
+      const ptsStr = shaft.map((p) => `${num(p.x)},${num(p.y)}`).join(' ');
+      const bg = palette.canvasBg;
+      const headSvg = (parts: ReturnType<typeof arrowHeadParts>): string => {
+        if (!parts) return '';
+        if (parts.triangle) {
+          const points = parts.triangle.map((v) => num(v)).join(',');
+          return parts.hollowFill
+            ? `<polygon points="${points}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
+            : `<polygon points="${points}" fill="${stroke}"${opacity}/>`;
+        }
+        if (parts.chevron) {
+          const points = parts.chevron.map((v) => num(v)).join(' ');
+          return `<polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${opacity}/>`;
+        }
+        if (parts.circle) {
+          return parts.hollowFill
+            ? `<circle cx="${num(parts.circle.x)}" cy="${num(parts.circle.y)}" r="${num(parts.circle.r)}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
+            : `<circle cx="${num(parts.circle.x)}" cy="${num(parts.circle.y)}" r="${num(parts.circle.r)}" fill="${stroke}"${opacity}/>`;
+        }
+        return '';
+      };
+      const dash = n.strokeStyle === 'dashed' ? ` stroke-dasharray="${num(Math.max(8, sw * 4))} ${num(Math.max(6, sw * 2.8))}"` : n.strokeStyle === 'dotted' ? ` stroke-dasharray="1 ${num(Math.max(4, sw * 2.4))}"` : '';
+      return wrap(
+        `<polyline points="${ptsStr}" fill="none"${common}${dash} stroke-linecap="round" stroke-linejoin="round"/>` +
+          headSvg(tailParts) +
+          headSvg(headParts),
+      );
     }
     default:
       return '';
@@ -286,6 +396,13 @@ function edgeToSvg(
 ): string {
   const fr = { x: from.x, y: from.y, width: from.width, height: from.height };
   const tr = { x: to.x, y: to.y, width: to.width, height: to.height };
+  if (e.kind === 'mindmap') {
+    // 导图分支线：与画布 EdgeView 同一条三次贝塞尔（水平切线、张力随水平距离缩放），无箭头
+    const [p0, c1, c2, p1] = mindmapEdgeCurve(fr, tr).path;
+    const color = resolveColor(e.color, palette) ?? palette.accent;
+    const d = `M ${num(p0.x)} ${num(p0.y)} C ${num(c1.x)} ${num(c1.y)}, ${num(c2.x)} ${num(c2.y)}, ${num(p1.x)} ${num(p1.y)}`;
+    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" opacity="0.85"/>`;
+  }
   const sides = inferSides(fr, tr);
   const fromSide = e.fromSide ?? sides.fromSide;
   const toSide = e.toSide ?? sides.toSide;
@@ -293,22 +410,16 @@ function edgeToSvg(
   const b = sideAnchor(tr, toSide);
   const { path } = bezierPath(a, fromSide, b, toSide);
   const [, c1, c2, bEnd] = path;
-  const isMindmap = e.kind === 'mindmap';
-  const color = resolveColor(e.color, palette) ?? (isMindmap ? palette.accent : palette.edge);
-  const sw = isMindmap ? 1.6 : 2;
+  const color = resolveColor(e.color, palette) ?? palette.edge;
   const d = `M ${num(a.x)} ${num(a.y)} C ${num(c1.x)} ${num(c1.y)}, ${num(c2.x)} ${num(c2.y)}, ${num(bEnd.x)} ${num(bEnd.y)}`;
-  let out = `<path d="${d}" fill="none" stroke="${color}" stroke-width="${sw}"${isMindmap ? ' opacity="0.85"' : ''}/>`;
-  if (!isMindmap) {
-    const tan = { x: bEnd.x - c2.x, y: bEnd.y - c2.y };
-    const ang = Math.atan2(tan.y, tan.x);
-    const len = 9;
-    const spread = 0.45;
-    const head = [
-      `${num(bEnd.x)},${num(bEnd.y)}`,
-      `${num(bEnd.x - len * Math.cos(ang - spread))},${num(bEnd.y - len * Math.sin(ang - spread))}`,
-      `${num(bEnd.x - len * Math.cos(ang + spread))},${num(bEnd.y - len * Math.sin(ang + spread))}`,
-    ].join(' ');
-    out += `\n<polygon points="${head}" fill="${color}"/>`;
-  }
-  return out;
+  const tan = { x: bEnd.x - c2.x, y: bEnd.y - c2.y };
+  const ang = Math.atan2(tan.y, tan.x);
+  const len = 9;
+  const spread = 0.45;
+  const head = [
+    `${num(bEnd.x)},${num(bEnd.y)}`,
+    `${num(bEnd.x - len * Math.cos(ang - spread))},${num(bEnd.y - len * Math.sin(ang - spread))}`,
+    `${num(bEnd.x - len * Math.cos(ang + spread))},${num(bEnd.y - len * Math.sin(ang + spread))}`,
+  ].join(' ');
+  return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"/>\n<polygon points="${head}" fill="${color}"/>`;
 }

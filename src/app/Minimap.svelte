@@ -7,6 +7,7 @@
   import type { CanvasApp } from './CanvasApp';
   import { ui } from './ui.svelte';
   import { nodeRect, type Rect } from '../core/geometry';
+  import { paintOrder } from '../core/zorder';
   import {
     MINIMAP_W,
     MINIMAP_H,
@@ -93,7 +94,7 @@
 
     // 节点
     const selection = app.doc.selection;
-    for (const n of app.doc.nodes) {
+    for (const n of paintOrder(app.doc.nodes)) {
       if (eng.isNodeHidden(n.id)) continue;
       const r: Rect = nodeRect(n);
       const a = worldToMap(lay, r.x, r.y);

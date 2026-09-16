@@ -124,8 +124,12 @@
       <label><input type="radio" bind:group={settings.background.mode} value="grid" />网格</label>
     </div>
     <div class="row">
-      <span>底色</span>
+      <span>底色（日间）</span>
       <input type="color" bind:value={settings.background.color} />
+    </div>
+    <div class="row">
+      <span>底色（夜间）</span>
+      <input type="color" bind:value={settings.background.colorDark} />
     </div>
     {#if settings.background.mode === 'dots'}
       <div class="row">
@@ -140,8 +144,12 @@
         <label><input type="radio" bind:group={settings.background.dotShape} value="diamond" />菱形</label>
       </div>
       <div class="row">
-        <span>点颜色</span>
+        <span>点颜色（日间）</span>
         <input type="color" bind:value={settings.background.dotColor} />
+      </div>
+      <div class="row">
+        <span>点颜色（夜间）</span>
+        <input type="color" bind:value={settings.background.dotColorDark} />
       </div>
       <div class="row">
         <span>间距</span>
@@ -171,8 +179,12 @@
         <em>{Math.round(settings.background.gridMajorOpacity * 100)}%</em>
       </div>
       <div class="row">
-        <span>网格色</span>
+        <span>网格色（日间）</span>
         <input type="color" bind:value={settings.background.gridColor} />
+      </div>
+      <div class="row">
+        <span>网格色（夜间）</span>
+        <input type="color" bind:value={settings.background.gridColorDark} />
       </div>
     {/if}
   </section>
@@ -249,7 +261,6 @@
           if (e.key === 'Enter') e.currentTarget.blur();
         }}
         use:wheelAdjust={{ kind: 'value' }}
-        style="width:56px"
       />
       <span>字重</span>
       <input
@@ -273,7 +284,6 @@
         onkeydown={(e) => {
           if (e.key === 'Enter') e.currentTarget.blur();
         }}
-        style="width:52px"
       />
       <span>颜色</span>
       <input type="color" bind:value={settings.text.color} />

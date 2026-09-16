@@ -5,17 +5,30 @@
  */
 import { Tool, type PointerEvt } from './types';
 import { Document } from '../core/Document';
-import type { ShapeKind } from '../core/types';
-import { rectFromPoints, normalizeRect, inferSides, sideAnchor, type Vec } from '../core/geometry';
-import { textStyleDefaults } from '../core/defaults';
+import type { ArrowHeadStyle, ShapeKind } from '../core/types';
+import { rectFromPoints, normalizeRect, shapeRectFromDrag, inferSides, sideAnchor, type Vec } from '../core/geometry';
+import { DEFAULT_SETTINGS, textBorderDefaults, textStyleDefaults } from '../core/defaults';
+import { magnetAnchor } from '../core/arrowLink';
 
 const LINE_LIKE: Set<string> = new Set(['line', 'arrow']);
+
+/** 端点磁吸半径（屏幕 px）：落点在此距离内即吸附到元素边缘锚点并建立绑定 */
+const MAGNET_PX = 14;
+
+interface Magnet {
+  id: string;
+  x: number;
+  y: number;
+}
 
 export class ShapeTool extends Tool {
   readonly id: string;
   readonly shape: ShapeKind;
   private draft: { start: Vec; cur: Vec } | null = null;
   private edgeFrom: string | null = null;
+  /** 绘制期间的端点磁吸：起/终点吸附到的元素锚点（建立 fromNode/toNode 绑定） */
+  private startMagnet: Magnet | null = null;
+  private endMagnet: Magnet | null = null;
 
   constructor(id: string, shape: ShapeKind) {
     super();
@@ -23,11 +36,34 @@ export class ShapeTool extends Tool {
     this.shape = shape;
   }
 
+  /** 半径换世界单位后的磁吸查找（排除给定元素，避免首尾吸到同一元素成环） */
+  private magnet(wx: number, wy: number, exclude?: string | null): Magnet | null {
+    const { doc, engine } = this.ctx;
+    return magnetAnchor(wx, wy, MAGNET_PX / engine.vp.scale, doc.nodes, (id) => !engine.isNodeHidden(id), exclude);
+  }
+
+  /** 本工具新建线形节点时的端点样式（读设置默认值；与形状自身默认一致的字段不写，保持文件干净） */
+  private headTailStyles(): { headStyle?: ArrowHeadStyle; tailStyle?: ArrowHeadStyle } {
+    const { arrowHead, arrowTail } = this.ctx.settings.shape;
+    if (this.shape === 'arrow') {
+      return {
+        headStyle: arrowHead !== 'solid' ? arrowHead : undefined,
+        tailStyle: arrowTail !== 'none' ? arrowTail : undefined,
+      };
+    }
+    return {
+      headStyle: arrowHead !== 'none' ? arrowHead : undefined,
+      tailStyle: arrowTail !== 'none' ? arrowTail : undefined,
+    };
+  }
+
   onActivate(): void {
     this.ctx.engine.overlayState.draft = null;
     this.ctx.engine.overlayState.lineDraft = null;
     this.ctx.engine.overlayState.edgeDraft = null;
     this.ctx.engine.overlayState.ports = [];
+    this.startMagnet = null;
+    this.endMagnet = null;
   }
 
   onDeactivate(): void {
@@ -35,6 +71,8 @@ export class ShapeTool extends Tool {
     this.ctx.engine.overlayState.lineDraft = null;
     this.ctx.engine.overlayState.edgeDraft = null;
     this.ctx.engine.overlayState.ports = [];
+    this.startMagnet = null;
+    this.endMagnet = null;
     this.ctx.engine.applyOverlay();
   }
 
@@ -43,14 +81,21 @@ export class ShapeTool extends Tool {
     // 从元素上起笔（箭头/直线）→ 连线模式
     if (e.pick.kind === 'node' && LINE_LIKE.has(this.shape)) {
       this.edgeFrom = e.pick.nodeId;
+      this.startMagnet = null;
+      this.endMagnet = null;
       const n = this.ctx.doc.getNode(e.pick.nodeId);
       if (n) {
         const anchor = sideAnchor({ x: n.x, y: n.y, width: n.width, height: n.height }, nearestSide(n, e.wx, e.wy));
-        this.ctx.engine.overlayState.lineDraft = { a: anchor, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow' };
+        this.ctx.engine.overlayState.lineDraft = { a: anchor, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow', ...this.headTailStyles() };
       }
       return;
     }
-    this.draft = { start: { x: e.wx, y: e.wy }, cur: { x: e.wx, y: e.wy } };
+    this.startMagnet = null;
+    this.endMagnet = null;
+    // 空白起笔：靠近元素边缘时磁吸到锚点（绘制中预览吸附，松手建立绑定）
+    const m = LINE_LIKE.has(this.shape) ? this.magnet(e.wx, e.wy) : null;
+    this.startMagnet = m;
+    this.draft = { start: m ? { x: m.x, y: m.y } : { x: e.wx, y: e.wy }, cur: { x: e.wx, y: e.wy } };
   }
 
   onPointerMove(e: PointerEvt): void {
@@ -65,7 +110,7 @@ export class ShapeTool extends Tool {
         return;
       }
       const a = engine.overlayState.lineDraft?.a ?? { x: e.wx, y: e.wy };
-      engine.overlayState.lineDraft = { a, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow' };
+      engine.overlayState.lineDraft = { a, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow', ...this.headTailStyles() };
       // 悬停目标 Ports
       const over = engine.pick(e.wx, e.wy);
       if (over.kind === 'node') {
@@ -87,14 +132,18 @@ export class ShapeTool extends Tool {
     }
     this.draft.cur = { x: e.wx, y: e.wy };
     if (LINE_LIKE.has(this.shape)) {
-      // 直线/箭头：预览为真实线段（箭头带头部），跟随拖拽方向可到任意象限
-      const end = e.shift ? snapAngle(this.draft.start, this.draft.cur) : this.draft.cur;
+      // 直线/箭头：预览为真实线段（箭头带头部），跟随拖拽方向可到任意象限；
+      // 终点靠近元素边缘时磁吸到锚点（优先于 Shift 角度吸附）
+      this.endMagnet = this.magnet(e.wx, e.wy, this.startMagnet?.id);
+      const magEnd = this.endMagnet ? { x: this.endMagnet.x, y: this.endMagnet.y } : null;
+      const end = magEnd ?? (e.shift ? snapAngle(this.draft.start, this.draft.cur) : this.draft.cur);
       engine.overlayState.draft = null;
-      engine.overlayState.lineDraft = { a: this.draft.start, b: end, arrow: this.shape === 'arrow' };
+      engine.overlayState.lineDraft = { a: this.draft.start, b: end, arrow: this.shape === 'arrow', ...this.headTailStyles() };
       engine.applyOverlay();
       return;
     }
-    const rect = normalizeRect(rectFromPoints(this.draft.start, this.draft.cur));
+    // 形状：PS 规范辅助键 —— Shift 约束正形 / Alt 中心展开，预览实时跟随
+    const rect = shapeRectFromDrag(this.draft.start, this.draft.cur, e.shift, e.alt);
     const kind = this.shape === 'rect' ? 'rect' : this.shape === 'ellipse' ? 'ellipse' : this.shape === 'diamond' ? 'diamond' : 'triangle';
     engine.overlayState.draft = { rect, kind };
     engine.applyOverlay();
@@ -114,32 +163,38 @@ export class ShapeTool extends Tool {
       if (from && over.kind === 'node' && over.nodeId !== this.edgeFrom) {
         const to = doc.getNode(over.nodeId)!;
         const sides = inferSides({ x: from.x, y: from.y, width: from.width, height: from.height }, { x: to.x, y: to.y, width: to.width, height: to.height });
-        doc.addEdge(Document.newEdge({ fromNode: from.id, toNode: to.id, ...sides, kind: 'link' }));
+        doc.addEdge(Document.newEdge({ fromNode: from.id, toNode: to.id, ...sides }));
       } else if (from) {
-        // 落在空白 → 独立箭头/直线
+        // 落在空白 → 独立箭头/直线，起点保持绑定在该元素上；终点靠近其他元素则磁吸绑定
         const start = sideAnchor({ x: from.x, y: from.y, width: from.width, height: from.height }, nearestSide(from, e.wx, e.wy));
-        this.createLineNode(start, { x: e.wx, y: e.wy });
+        const m = this.magnet(e.wx, e.wy, from.id);
+        const end = m ? { x: m.x, y: m.y } : { x: e.wx, y: e.wy };
+        this.createLineNode(start, end, false, { fromId: from.id, toId: m?.id });
       }
       this.edgeFrom = null;
+      this.startMagnet = null;
+      this.endMagnet = null;
       engine.applyOverlay();
       return;
     }
 
     if (!this.draft) return;
-    const start = this.draft.start;
     const cur = { x: e.wx, y: e.wy };
+    const startM = this.startMagnet;
+    const endM = this.endMagnet;
+    const start = startM ? { x: startM.x, y: startM.y } : this.draft.start;
     this.draft = null;
+    this.startMagnet = null;
+    this.endMagnet = null;
 
     if (LINE_LIKE.has(this.shape)) {
-      this.createLineNode(start, cur, e.shift);
+      const end = endM ? { x: endM.x, y: endM.y } : cur;
+      this.createLineNode(start, end, endM ? false : e.shift, { fromId: startM?.id, toId: endM?.id });
       return;
     }
 
-    let rect = normalizeRect(rectFromPoints(start, cur));
-    if (e.shift) {
-      const size = Math.max(rect.width, rect.height);
-      rect = { ...rect, width: size, height: size };
-    }
+    // 与拖拽预览同一套辅助键几何（Shift 约束正形 / Alt 中心展开）
+    const rect = shapeRectFromDrag(start, cur, e.shift, e.alt);
     if (rect.width < 6 || rect.height < 6) return; // 误触
 
     const node = Document.newNode({
@@ -150,14 +205,14 @@ export class ShapeTool extends Tool {
       width: rect.width,
       height: rect.height,
       fill: settings.shape.fill,
-      stroke: settings.shape.stroke,
+      stroke: settings.shape.stroke === DEFAULT_SETTINGS.shape.stroke ? undefined : settings.shape.stroke,
       strokeSize: settings.shape.strokeSize,
     });
     doc.addNodes([node]);
     this.ctx.setTool('select');
   }
 
-  private createLineNode(start: Vec, end: Vec, constrain = false): void {
+  private createLineNode(start: Vec, end: Vec, constrain = false, bind?: { fromId?: string; toId?: string }): void {
     const { doc, settings } = this.ctx;
     const snapped = constrain ? snapAngle(start, end) : end;
     const ex = snapped.x;
@@ -176,9 +231,14 @@ export class ShapeTool extends Tool {
         [start.x - x, start.y - y],
         [ex - x, ey - y],
       ],
-      stroke: settings.shape.stroke,
+      // 描边等于全局默认时不烤进节点（渲染回退到调色板描边色，随主题日夜适配）
+      stroke: settings.shape.stroke === DEFAULT_SETTINGS.shape.stroke ? undefined : settings.shape.stroke,
       strokeSize: settings.shape.strokeSize,
       fill: null,
+      // 端点磁吸绑定：端点锚在元素边缘并随其移动；双端绑定渲染为贝塞尔曲线
+      ...(bind?.fromId ? { fromNode: bind.fromId } : {}),
+      ...(bind?.toId ? { toNode: bind.toId } : {}),
+      ...this.headTailStyles(),
     });
     doc.addNodes([node]);
     this.ctx.setTool('select');
@@ -255,7 +315,8 @@ export class PolylineTool extends Tool {
       width: Math.max(1, maxX - minX),
       height: Math.max(1, maxY - minY),
       points: pts.map((p) => [p.x - minX, p.y - minY]),
-      stroke: settings.shape.stroke,
+      // 描边等于全局默认时不烤进节点（渲染回退到调色板描边色，随主题日夜适配）
+      stroke: settings.shape.stroke === DEFAULT_SETTINGS.shape.stroke ? undefined : settings.shape.stroke,
       strokeSize: settings.shape.strokeSize,
       fill: null,
     });
@@ -279,6 +340,7 @@ export class TextTool extends Tool {
         height: 36,
         text: '',
         ...textStyleDefaults(this.ctx.settings.text),
+        ...textBorderDefaults(this.ctx.settings.shape),
       });
       this.ctx.doc.addNodes([node]);
       this.ctx.setTool('select');

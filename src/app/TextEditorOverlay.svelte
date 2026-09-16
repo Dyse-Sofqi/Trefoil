@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { CanvasApp } from './CanvasApp';
   import { ui } from './ui.svelte';
-  import { autoTextHeight, canvasFont, fontVerticalMetrics, layoutText } from '../engine/textMeasure';
+  import { autoTextHeight, autoTextWidth, canvasFont, fontVerticalMetrics, layoutText } from '../engine/textMeasure';
   import { TEXT_PADDING } from '../engine/NodeView';
   import { resolveColor } from '../engine/palette';
 
@@ -80,22 +80,35 @@
     const vm = fontVerticalMetrics(fontCss);
     const mo = vm.baselineOffset;
     const shift = -vm.inkCenterOffset; // 与渲染层一致：墨迹视觉居中
+    // 宽高贴合内容（与 commitText 同一算法）：随输入实时伸缩，提交后几何不变、画布不跳。
+    // 空文本给占位符宽（5 字宽 + 内边距），保证「输入文字…」完整可见
+    const worldW = value ? autoTextWidth(value, F, family, weight) : Math.ceil(F * 5) + TEXT_PADDING * 2;
+    const worldH = autoTextHeight(value, worldW, F, family, weight);
+    const layout = layoutText(value, Math.max(20, worldW - TEXT_PADDING * 2), F, family, weight);
     // 垂直方向恒居中：与 NodeView.buildText 同公式（世界单位）
-    const layout = layoutText(value, Math.max(20, node.width - TEXT_PADDING * 2), F, family, weight);
-    const startY = Math.max(TEXT_PADDING, (node.height - layout.height) / 2);
-    // DOM 首行基线 = top + padTop + 半行距 + ascent；画布首行基线 = top + (startY + 行距/2 + shift + mo)·s
-    // 反解 padTop 使两者重合（原地编辑）；padTop 为负时平移到 top 上（padding 不接受负值）
-    let padTop = s * (startY + LH / 2 + shift + mo - LH / 2 - (m.ascent - m.descent) / 2);
+    const startY = Math.max(TEXT_PADDING, (worldH - layout.height) / 2);
+    // 编辑态带出背景与实体边框（所见即所得）：与画布 paintFrame 同一几何 —— 内缩描边、圆角夹取。
+    // 边框被取消的节点保持无边框透明；背景跟随节点 fill
+    const bSw = node.border ? Math.max(1, node.strokeSize ?? 2) : 0;
+    const borderColor = node.border ? (resolveColor(node.stroke, app.palette) ?? app.palette.nodeStroke) : null;
+    const borderDash = node.borderStyle === 'dashed' ? 'dashed' : node.borderStyle === 'dotted' ? 'dotted' : 'solid';
+    const frameR = Math.min(Math.max(0, node.borderRadius ?? 0), Math.max(0, Math.min(worldW, worldH) / 2 - bSw / 2));
+    const bg = node.fill ? (resolveColor(node.fill, app.palette) ?? 'transparent') : 'transparent';
+    // DOM 首行基线 = top + 边框 + padTop + 半行距 + ascent；画布首行基线 = top + (startY + 行距/2 + shift + mo)·s
+    // 反解 padTop 使两者重合（原地编辑）；CSS 边框把内容整体下推 bSw·s，需从 padTop 中扣除；
+    // 水平同理：padX = (TEXT_PADDING - bSw)·s。padTop 为负时平移到 top 上（padding 不接受负值）
+    let padTop = s * (startY + LH / 2 + shift + mo - LH / 2 - (m.ascent - m.descent) / 2) - bSw * s;
     let topAdjust = 0;
     if (padTop < 0) {
       topAdjust = padTop;
       padTop = 0;
     }
-    const padX = TEXT_PADDING * s;
+    const padX = Math.max(0, TEXT_PADDING - bSw) * s;
     return {
       left: p.x,
       top: p.y + topAdjust,
-      width: Math.max(60, node.width * s),
+      width: worldW * s,
+      height: worldH * s,
       fontSize: F * s,
       lineHeight: LH * s,
       padTop,
@@ -104,18 +117,13 @@
       fontWeight: weight,
       color: resolveColor(node.color, app.palette) ?? 'var(--text-normal, #1f1f1f)',
       align: node.hAlign ?? 'left',
+      borderCss: borderColor ? `${bSw * s}px ${borderDash} ${borderColor}` : 'none',
+      radiusCss: `${frameR * s}px`,
+      bgCss: bg,
     };
   });
 
-  // 高度随内容生长（与渲染态 autoTextHeight 同一算法，所见即所得）
-  $effect(() => {
-    void value;
-    const el = textareaEl;
-    const n = node;
-    if (!el || !n) return;
-    const worldH = autoTextHeight(value, n.width, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
-    el.style.minHeight = `${Math.max(28, worldH * app.engine.vp.scale)}px`;
-  });
+  // 高度随内容生长（与渲染态 autoTextHeight 同一算法，所见即所得）——并入 box 派生值，模板声明式绑定
 
   function commit(): void {
     if (editingId) app.commitText(editingId, value);
@@ -142,6 +150,7 @@
     style:left="{box.left}px"
     style:top="{box.top}px"
     style:width="{box.width}px"
+    style:height="{box.height}px"
     style:padding="{box.padTop}px {box.padX}px {box.padX}px"
     style:font-size="{box.fontSize}px"
     style:line-height="{box.lineHeight}px"
@@ -149,6 +158,9 @@
     style:font-weight="{box.fontWeight}"
     style:color="{box.color}"
     style:text-align="{box.align === 'justify' ? 'justify' : box.align}"
+    style:--trefoil-editor-border={box.borderCss}
+    style:--trefoil-editor-radius={box.radiusCss}
+    style:--trefoil-editor-bg={box.bgCss}
     bind:value
     oninput={() => {}}
     onblur={commit}
@@ -160,17 +172,18 @@
 {/if}
 
 <style>
-  /* 所见即所得：无背景、无边框、无特效，度量与 Konva 渲染态完全一致。
-     !important 用于压过 Obsidian 全局 textarea 样式（form-field 背景/边框/内边距/聚焦环）。 */
+  /* 所见即所得：度量与 Konva 渲染态完全一致；边框/圆角/背景由节点样式经 CSS 变量注入
+     （默认透明无边框，见 box 派生值）。!important 用于压过 Obsidian 全局 textarea 样式
+     （form-field 背景/边框/内边距/聚焦环）——变量在声明处展开，保持覆盖力。 */
   .trefoil-text-editor {
     position: absolute;
     z-index: 500;
     margin: 0;
-    border: none !important;
-    border-radius: 0 !important;
+    border: var(--trefoil-editor-border, none) !important;
+    border-radius: var(--trefoil-editor-radius, 0) !important;
     outline: none;
     box-shadow: none !important;
-    background: transparent !important;
+    background: var(--trefoil-editor-bg, transparent) !important;
     resize: none;
     overflow: hidden;
     box-sizing: border-box;
@@ -179,7 +192,6 @@
   }
   .trefoil-text-editor:focus {
     box-shadow: none !important;
-    background: transparent !important;
   }
   .trefoil-text-editor::placeholder {
     color: var(--text-faint, #aaa);

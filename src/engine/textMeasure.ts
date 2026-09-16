@@ -223,3 +223,18 @@ export function autoTextHeight(md: string, width: number, fontSize: number, font
   const layout = layoutText(md, Math.max(20, width - 12), fontSize, fontFamily, baseWeight);
   return Math.max(36, layout.height + 10);
 }
+
+/** 文本框自适应宽度的上限：自然宽超过它才折行（编辑提交/粘贴/字体调整共用） */
+export const TEXT_MAX_WIDTH = 480;
+
+/**
+ * 文本内容的贴合宽度（最宽行 + 左右内边距）：文本框自适应文字内容用。
+ * 按「上限内容宽」预排版 —— 可折行的长段落折行后取最宽行（框宽 ≤ 上限）；
+ * 无法折行的超长单词/URL 整行保留（框随之变宽，避免文字溢出框外）。
+ * 空文本给光标位的最小框宽（左右内边距）。
+ */
+export function autoTextWidth(md: string, fontSize: number, fontFamily: string, baseWeight = 400): number {
+  const layout = layoutText(md, TEXT_MAX_WIDTH - 12, fontSize, fontFamily, baseWeight);
+  const widest = layout.lines.reduce((m, l) => Math.max(m, l.width), 0);
+  return Math.ceil(widest) + 12;
+}

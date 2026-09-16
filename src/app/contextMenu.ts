@@ -4,6 +4,7 @@ import type { ContextMenuInfo } from '../tools/types';
 import { ui } from './ui.svelte';
 import type { CanvasNode } from '../core/types';
 import { NODE_TYPE_SHAPE } from '../core/types';
+import { isMapMember, mapParentId } from '../core/mindmap';
 
 export interface MenuItem {
   label?: string;
@@ -58,6 +59,17 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
 
   // 有选中内容或点击元素
   const items: MenuItem[] = [];
+
+  // 双击/右键连线：编辑关系描述、删除（连线不在节点选择集内，单独给菜单）
+  if (info.pick.kind === 'edge') {
+    const edgeId = info.pick.edgeId;
+    const e = doc.getEdge(edgeId);
+    items.push({ label: '编辑关系描述', hint: '双击', action: () => app.beginLabelEdit('edge', edgeId) });
+    if (e?.label) items.push({ label: '清除关系描述', action: () => doc.updateEdge(e.id, { label: undefined }, '清除关系描述') });
+    items.push({ label: '删除连线', hint: 'Delete', danger: true, action: () => doc.removeEdges([e!.id]) });
+    return items;
+  }
+
   const single = sel.length === 1 ? sel[0] : null;
   const clicked =
     info.pick.kind === 'node'
@@ -69,6 +81,10 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
   // 若点击的元素未被选中 → 视为对它的操作
   const target: CanvasNode | null = clicked ?? single;
 
+  if (target && target.type === NODE_TYPE_SHAPE && (target.shape === 'line' || target.shape === 'arrow' || target.shape === 'polyline')) {
+    items.push({ label: '编辑关系描述', hint: '双击', action: () => app.beginLabelEdit('node', target.id) });
+  }
+
   if (target?.type === 'text' && !target.containerId) {
     items.push({ label: '编辑文本', hint: '双击', action: () => app.beginPathTextEdit(target.id) });
     items.push({ label: '文本样式…', action: () => (ui.propsOpen = true) });
@@ -77,20 +93,27 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
 
   // 容器操作
   if (target?.type === 'trefoil/container') {
-    items.push({ label: '添加子节点', hint: 'Tab', action: () => app.addChildTo(target.id) });
-    items.push({
-      label: '自动布局',
-      children: [
-        { label: '横向树', action: () => app.layoutContainer(target.id, 'horizontal') },
-        { label: '纵向树', action: () => app.layoutContainer(target.id, 'vertical') },
-      ],
-    });
-    items.push({
-      label: target.collapsed ? '展开全部' : '折叠全部',
-      action: () => app.toggleContainerCollapse(target.id),
-    });
     items.push({ label: '重命名容器', action: () => app.renameContainer(target.id) });
     items.push({ label: '拆解容器', action: () => app.decomposeContainer(target.id) });
+    items.push({ separator: true });
+  }
+
+  // 导图操作（主节点/成员的快捷增删与升级、取消升级）
+  if (target && target.type !== 'trefoil/container') {
+    if (target.mapRoot) {
+      items.push({ label: '添加子节点', hint: 'Tab', action: () => app.addMapChildTo(target.id) });
+      items.push({ label: '取消导图主节点', action: () => app.downgradeMapRoot(target.id) });
+    } else if (isMapMember(app.doc, target.id)) {
+      items.push({ label: '添加子节点', hint: 'Tab', action: () => app.addMapChildTo(target.id) });
+      items.push({
+        label: '添加同级节点',
+        hint: 'Enter',
+        disabled: !mapParentId(app.doc, target.id),
+        action: () => app.addMapSiblingOf(target.id),
+      });
+    } else {
+      items.push({ label: '升级为导图主节点', action: () => app.upgradeMapRoot(target.id) });
+    }
     items.push({ separator: true });
   }
 
@@ -131,8 +154,8 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
   }
 
   items.push({ label: '复制', hint: 'Ctrl+C', action: () => app.copySelection(false) });
-  if (sel.length > 0) {
-    items.push({ label: '剪切', hint: 'Ctrl+X', action: () => app.copySelection(true) });
+  if (sel.length > 0 || doc.selection.size > 0) {
+    items.push({ label: '剪切', hint: 'Ctrl+X', disabled: sel.length === 0, action: () => app.copySelection(true) });
     items.push({ label: '删除', hint: 'Delete', danger: true, action: () => app.deleteSelection() });
   }
 

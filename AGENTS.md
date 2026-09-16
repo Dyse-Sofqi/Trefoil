@@ -12,7 +12,7 @@ Obsidian 白板插件「思考的可视化工作台」。技术栈：TypeScript 
 ## 常用命令
 
 - `pnpm dev` — 浏览器开发测试台 http://localhost:5198/dev/（无 Obsidian 依赖，localStorage 持久化）
-- `pnpm test` — vitest 单元测试（34 项）
+- `pnpm test` — vitest 单元测试
 - `pnpm build` — 类型检查 + 构建 + 自动部署到测试库
 - `pnpm package` — 组装发布包到 build/release/trefoil-{version}/
 - 环境变量：`TREFOIL_VAULT=<路径>` 覆盖同步目标；`TREFOIL_NO_DEPLOY=1` 跳过同步。

@@ -1,7 +1,7 @@
 {
   "id": "trefoil",
   "name": "Trefoil",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.5.0",
   "description": "Visual thinking workbench: precise geometric shapes, structured mind-map containers, building-block interaction and laser-pointer annotation on JSON Canvas whiteboards.",
   "author": "Sofqi",

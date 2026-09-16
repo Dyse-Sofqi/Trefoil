@@ -95,7 +95,7 @@ export class ObsidianAdapter implements HostAdapter {
 
   markSaved(text: string): void {
     this.savingText = text;
-    setTimeout(() => {
+    window.setTimeout(() => {
       if (this.savingText === text) this.savingText = null;
     }, 800);
   }

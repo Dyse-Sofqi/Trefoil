@@ -1,6 +1,5 @@
 /* dev 测试台额外样式（浏览器环境） */
 :root {
-  --trefoil-canvas-bg: #ffffff;
   --text-normal: #1f1f1f;
   --text-muted: #777777;
   --text-faint: #999999;
@@ -10,6 +9,13 @@
   --background-modifier-hover: #ececec;
   --interactive-accent: #4c8dff;
   --font-interface: system-ui, 'Microsoft YaHei', sans-serif;
+}
+
+/* 画布底色变量故意挂在应用根 #app 上（而不是 :root/body）：
+   Obsidian 里 TrefoilView 也是把它设在视图内容元素 contentEl 上（body 的子孙）。
+   层级与宿主一致，才能暴露「从 document.body 读不到该变量 → 静默回退成 #ffffff」这类夜间模式问题。 */
+#app {
+  --trefoil-canvas-bg: #ffffff;
 }
 
 /* 模拟 Obsidian app.css 对 textarea 的全局污染（背景/边框/内边距/行高/聚焦环），
@@ -29,9 +35,9 @@ textarea:focus {
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
 
-/* 深色主题（?theme=dark）：覆盖上方 :root 变量，故必须排在后面 */
+/* 深色主题（?theme=dark）：class 挂在 body 上（与 Obsidian 一致，CanvasApp.themeKind 读的就是 body），
+   覆盖上方 :root 变量，故必须排在后面 */
 .theme-dark {
-  --trefoil-canvas-bg: #1e1e22;
   --text-normal: #e6e6e6;
   --text-muted: #9a9a9a;
   --text-faint: #6f6f6f;
@@ -39,6 +45,10 @@ textarea:focus {
   --background-modifier-border: #3c3c40;
   --background-modifier-hover: #333338;
   --interactive-accent: #5f8eff;
+}
+
+.theme-dark #app {
+  --trefoil-canvas-bg: #1e1e22;
 }
 
 /* 轻提示（DevAdapter.toast 创建，2.2s 后淡出） */

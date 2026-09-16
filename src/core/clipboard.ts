@@ -57,7 +57,6 @@ export class Clipboard {
       x: n.x + ox,
       y: n.y + oy,
       containerId: n.containerId && idMap.has(n.containerId) ? idMap.get(n.containerId)! : null,
-      treeParent: n.treeParent && idMap.has(n.treeParent) ? idMap.get(n.treeParent)! : null,
       groupId: n.groupId ? uid('g') : null,
     }));
     const edges: CanvasEdge[] = data.edges.map((e) => ({
@@ -100,14 +99,9 @@ export class Clipboard {
         y: box!.y - 32,
         width: box!.width + 64,
         height: box!.height + 64,
-        layout: 'horizontal',
       });
       for (const n of nodes) {
         n.containerId = containerId;
-        // 第一个节点为树根，其余依次挂为其子节点
-        if (n !== nodes[0]) {
-          n.treeParent = nodes[0].id;
-        }
       }
       doc.reindex();
     });
@@ -124,7 +118,6 @@ export class Clipboard {
         const n = doc.getNode(id);
         if (n) {
           n.containerId = null;
-          n.treeParent = null;
         }
       }
       doc.nodes = doc.nodes.filter((n) => n.id !== containerId);

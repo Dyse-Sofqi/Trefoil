@@ -4,14 +4,18 @@
  */
 import Konva from 'konva';
 import type { Rect, Vec } from '../core/geometry';
+import type { ArrowHeadStyle } from '../core/types';
 import type { Guide } from '../core/snap';
 import type { Palette } from './palette';
-import { arrowHeadPoints } from './NodeView';
+import { arrowHeadParts, addHeadShapes } from './arrowHead';
 
 export type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+/** 线类节点（直线/箭头/折线）的端点手柄 id：pt0 = 起点、pt1 = 终点 */
+export type PointHandleId = `pt${number}`;
+export type ToolHandleId = HandleId | PointHandleId;
 
 export interface HandleHit {
-  id: HandleId;
+  id: ToolHandleId;
   x: number;
   y: number;
   w: number;
@@ -23,6 +27,8 @@ export interface OverlayState {
   selection: Rect[];
   /** 单选时的缩放手柄（屏幕坐标）；hideVertical = 高度自适应的节点（文本），上下中点手柄不参与缩放 */
   handles: (Rect & { hideVertical?: boolean }) | null;
+  /** 单选线类节点（直线/箭头/折线）的端点手柄（世界坐标）：拖端点改形状，替代四角缩放手柄 */
+  endpoints: Vec[] | null;
   marquee: Rect | null;
   guides: Guide[];
   /** 橡皮擦 */
@@ -34,10 +40,12 @@ export interface OverlayState {
   containerHover: Rect | null;
   /** 绘制预览（世界坐标 + 形状） */
   draft: { rect: Rect; kind: 'rect' | 'ellipse' | 'diamond' | 'triangle' } | null;
-  /** 直线/箭头绘制预览（世界坐标，跟随拖拽方向，可到任意象限） */
-  lineDraft: { a: Vec; b: Vec; arrow: boolean } | null;
+  /** 直线/箭头绘制预览（世界坐标，跟随拖拽方向，可到任意象限；端点样式与最终节点一致） */
+  lineDraft: { a: Vec; b: Vec; arrow: boolean; head?: ArrowHeadStyle; tail?: ArrowHeadStyle } | null;
   /** 连线预览（世界坐标点集） */
   edgeDraft: Vec[] | null;
+  /** 选中线的曲线高亮：path 为世界坐标（连线/绑定箭头 = 4 控制点，bezier=true；普通折线 = 顶点，bezier=false） */
+  edgeSelect: { path: number[]; bezier: boolean } | null;
   /** 箭头工具 Ports 提示（世界坐标锚点） */
   ports: Vec[];
 }
@@ -45,6 +53,8 @@ export interface OverlayState {
 export class Overlay {
   private group = new Konva.Group({ listening: false });
   private handles: HandleHit[] = [];
+  /** 端点手柄命中区（屏幕坐标），handleAt 时优先于缩放手柄 */
+  private pointHandles: { id: PointHandleId; x: number; y: number }[] = [];
   private palette: Palette;
 
   constructor(private layer: Konva.Layer, palette: Palette) {
@@ -57,6 +67,18 @@ export class Overlay {
   }
 
   handleAt(sx: number, sy: number): HandleHit | null {
+    // 端点手柄最优先：线类端点与四角缩放手柄本来就重叠（箭头两端 = 包围盒角点），
+    // 端点语义（改形状）必须压过缩放语义，否则箭头两头永远抓不到
+    let bestPt: { id: PointHandleId; x: number; y: number } | null = null;
+    let bestPtDist = Infinity;
+    for (const p of this.pointHandles) {
+      const d = Math.hypot(sx - p.x, sy - p.y);
+      if (d <= 10 && d < bestPtDist) {
+        bestPtDist = d;
+        bestPt = p;
+      }
+    }
+    if (bestPt) return { id: bestPt.id, x: bestPt.x - 4, y: bestPt.y - 4, w: 8, h: 8 };
     // 取「最近」而不是「先命中」：节点很小时相邻手柄的命中区（±4px 容差）会互相重叠，
     // 按数组顺序返回会让用户抓角手柄却抓到边手柄。
     let best: HandleHit | null = null;
@@ -74,12 +96,14 @@ export class Overlay {
 
   clearHandles(): void {
     this.handles = [];
+    this.pointHandles = [];
   }
 
   draw(state: OverlayState, vp: { x: number; y: number; scale: number }, stageW: number, stageH: number): void {
     const g = this.group;
     g.destroyChildren();
     this.handles = [];
+    this.pointHandles = [];
     const p = this.palette;
     const toSX = (w: number) => (w - vp.x) * vp.scale;
     const toSY = (w: number) => (w - vp.y) * vp.scale;
@@ -135,6 +159,25 @@ export class Overlay {
         );
         this.handles.push({ id, x: hx - size / 2, y: hy - size / 2, w: size, h: size });
       }
+    }
+
+    // 线类端点手柄（单选直线/箭头/折线）：圆点样式，拖动直接改折点（包围盒跟随重排）
+    for (const [i, ep] of (state.endpoints ?? []).entries()) {
+      const hx = toSX(ep.x);
+      const hy = toSY(ep.y);
+      const r = 4.5;
+      g.add(
+        new Konva.Circle({
+          x: hx,
+          y: hy,
+          radius: r,
+          fill: '#ffffff',
+          stroke: p.accent,
+          strokeWidth: 1.4,
+          listening: false,
+        }),
+      );
+      this.pointHandles.push({ id: `pt${i}`, x: hx, y: hy });
     }
 
     // 框选
@@ -277,16 +320,20 @@ export class Overlay {
       }
     }
 
-    // 直线/箭头预览（与最终节点一致：箭头带头部）
+    // 直线/箭头预览（与最终节点一致：端点样式随设置，两端回缩；预览为固定屏幕线宽，几何直接在屏幕坐标算）
     if (state.lineDraft) {
       const ld = state.lineDraft;
-      const ax = toSX(ld.a.x);
-      const ay = toSY(ld.a.y);
-      const bx = toSX(ld.b.x);
-      const by = toSY(ld.b.y);
+      const a = { x: toSX(ld.a.x), y: toSY(ld.a.y) };
+      const b = { x: toSX(ld.b.x), y: toSY(ld.b.y) };
+      const head = ld.arrow ? (ld.head ?? 'solid') : 'none';
+      const tail = ld.arrow ? (ld.tail ?? 'none') : 'none';
+      const headParts = arrowHeadParts(a, b, 1.8, head);
+      const tailParts = arrowHeadParts(b, a, 1.8, tail);
+      const sa = tailParts ? tailParts.shaftEnd : a;
+      const sb = headParts ? headParts.shaftEnd : b;
       g.add(
         new Konva.Line({
-          points: [ax, ay, bx, by],
+          points: [sa.x, sa.y, sb.x, sb.y],
           stroke: p.accent,
           strokeWidth: 1.8,
           lineCap: 'round',
@@ -294,15 +341,30 @@ export class Overlay {
           listening: false,
         }),
       );
-      if (ld.arrow) {
-        g.add(
-          new Konva.Line({
-            closed: true,
-            points: arrowHeadPoints({ x: ax, y: ay }, { x: bx, y: by }, 1.8),
-            fill: p.accent,
-            listening: false,
-          }),
-        );
+      if (tailParts) addHeadShapes(g, tailParts, p.accent, 1.8, p.canvasBg);
+      if (headParts) addHeadShapes(g, headParts, p.accent, 1.8, p.canvasBg);
+    }
+
+    // 选中线高亮（与原路径同曲线模式，贴合线身）
+    if (state.edgeSelect) {
+      const es = state.edgeSelect;
+      const pts: number[] = [];
+      for (let i = 0; i < es.path.length; i += 2) pts.push(toSX(es.path[i]!), toSY(es.path[i + 1]!));
+      g.add(
+        new Konva.Line({
+          points: pts,
+          bezier: es.bezier,
+          stroke: p.accent,
+          strokeWidth: 6,
+          opacity: 0.25,
+          lineCap: 'round',
+          lineJoin: 'round',
+          listening: false,
+        }),
+      );
+      const n = pts.length;
+      for (const [px, py] of [[pts[0]!, pts[1]!], [pts[n - 2]!, pts[n - 1]!]]) {
+        g.add(new Konva.Circle({ x: px, y: py, radius: 3.5, fill: p.accent, listening: false }));
       }
     }
 

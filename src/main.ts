@@ -86,16 +86,23 @@ export default class TrefoilPlugin extends Plugin {
       name: '缩放适应内容',
       checkCallback: (checking) => this.withActiveApp(checking, (app) => app.engine.zoomToFit()),
     });
+    // ⚠️ 这两个命令**绝对不能**声明默认热键（曾经声明过 Mod+Z / Mod+Shift+Z，会全局吞掉 Ctrl+Z）。
+    // Obsidian 的热键分发在 window 捕获阶段（Keymap.onKeyEvent）匹配到命令后调用
+    // Commands.executeCommand —— 它**不看 checkCallback 的结果**，只要不抛异常就返回 true，
+    // 于是 Keymap 认定「本次按键已被处理」，执行 preventDefault() + stopPropagation()。
+    // 后果：只要插件占用了 Mod+Z，整个 Obsidian 的 Ctrl+Z 都失效 ——
+    // CodeMirror 编辑器的原生撤销、白板内文本覆盖层 textarea 的撤销、各输入框的浏览器撤销全被吞掉，
+    // 而且事件被 stopPropagation 拦在 window 上，连 ToolManager 自己的监听器也收不到。
+    // 画布内的 Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y 由 ToolManager 的 window 监听器负责，不依赖默认热键；
+    // 想让画布外的入口（命令面板、移动端工具栏）也能用，用户可在「设置 → 快捷键」里自行绑定。
     this.addCommand({
       id: 'undo',
       name: '撤销',
-      hotkeys: [{ modifiers: ['Mod'], key: 'z' }],
       checkCallback: (checking) => this.withActiveApp(checking, (app) => app.history.undo()),
     });
     this.addCommand({
       id: 'redo',
       name: '重做',
-      hotkeys: [{ modifiers: ['Mod', 'Shift'], key: 'z' }],
       checkCallback: (checking) => this.withActiveApp(checking, (app) => app.history.redo()),
     });
 
@@ -216,10 +223,7 @@ export default class TrefoilPlugin extends Plugin {
     for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TREFOIL)) {
       const view = leaf.view;
       if (view instanceof TrefoilView && view.canvasApp) {
-        view.contentEl.style.setProperty(
-          '--trefoil-canvas-bg',
-          document.body.classList.contains('theme-dark') ? '#1e1e22' : '#ffffff',
-        );
+        // 底色变量随主题 class 由 CSS 自动切换，这里只需重绘画布
         view.canvasApp.retheme();
       }
     }

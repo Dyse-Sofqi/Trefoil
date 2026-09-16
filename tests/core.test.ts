@@ -1,10 +1,10 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parseInline } from '../src/core/mdInline';
-import { _setMeasureCtxForTests, autoTextHeight, layoutText } from '../src/engine/textMeasure';
+import { _setMeasureCtxForTests, autoTextHeight, autoTextWidth, layoutText } from '../src/engine/textMeasure';
 import { snapMove } from '../src/core/snap';
-import { mergeSettings, DEFAULT_SETTINGS, textStyleDefaults } from '../src/core/defaults';
+import { effectiveBackground, mergeSettings, textBorderDefaults, DEFAULT_SETTINGS, textStyleDefaults } from '../src/core/defaults';
 import { Document } from '../src/core/Document';
-import { addChildNode, addSiblingNode } from '../src/core/mindmap';
+import { darkenColor } from '../src/engine/palette';
 
 // Node 环境无 Canvas：注入等宽近似测量（0.6em/字符）
 beforeAll(() => {
@@ -74,6 +74,23 @@ describe('文本排版', () => {
     const h2 = autoTextHeight('a\nb\nc', 400, 16, 'monospace');
     expect(h2).toBeGreaterThan(h1);
   });
+
+  it('自适应宽度贴合最宽行（多行取最宽，空文本给光标位）', () => {
+    // 测试测量上下文：每字符 16 × 0.6 = 9.6px
+    expect(autoTextWidth('ab', 16, 'monospace')).toBe(Math.ceil(2 * 9.6) + 12);
+    expect(autoTextWidth('ab\nabcd', 16, 'monospace')).toBe(Math.ceil(4 * 9.6) + 12);
+    expect(autoTextWidth('', 16, 'monospace')).toBe(12);
+  });
+
+  it('自适应宽度：可折行的长段落不超过上限，无法折行的长词整行保留', () => {
+    // CJK 逐字成词：100 字在 468 内容宽内换行，框宽不超过 480 上限
+    const wrapped = autoTextWidth('国'.repeat(100), 16, 'monospace');
+    expect(wrapped).toBeLessThanOrEqual(480);
+    expect(wrapped).toBeGreaterThan(400);
+    // 单个超长词（如 URL）无法折行：框随之变宽，避免文字溢出框外
+    const longWord = autoTextWidth('a'.repeat(200), 16, 'monospace');
+    expect(longWord).toBe(Math.ceil(200 * 9.6) + 12);
+  });
 });
 
 describe('吸附系统', () => {
@@ -137,25 +154,49 @@ describe('文本默认继承（新建文本样式）', () => {
     expect(style).toEqual({ fontSize: 22, fontFamily: 'Georgia', fontWeight: 700, color: '#ff0000' });
   });
 
-  it('导图子节点继承字重与字体', () => {
-    const doc = new Document();
-    doc.nodes.push({ id: 'c1', type: 'trefoil/container', x: 0, y: 0, width: 300, height: 200 });
-    doc.reindex();
-    const id = addChildNode(doc, 'c1', null, { fontSize: 18, fontFamily: 'Georgia', fontWeight: 700, color: '#123456' });
-    expect(id).toBeTruthy();
-    expect(doc.getNode(id!)).toMatchObject({ fontSize: 18, fontFamily: 'Georgia', fontWeight: 700, color: '#123456' });
+  it('textBorderDefaults：新建文本默认带实线边框，颜色/粗细随形状默认', () => {
+    const b = textBorderDefaults({ fill: null, stroke: '#5a5a5a', strokeSize: 3, arrowHead: 'solid', arrowTail: 'none' });
+    expect(b).toEqual({ border: true, stroke: '#5a5a5a', strokeSize: 3, borderRadius: 6, borderStyle: 'solid' });
+  });
+});
+
+describe('名片底色加深（darkenColor）', () => {
+  it('浅色按比例加深', () => {
+    expect(darkenColor('#ffffff')).toBe('#e6e6e6');
   });
 
-  it('导图兄弟节点继承字重，缺省时回退参考节点', () => {
-    const doc = new Document();
-    doc.nodes.push(
-      { id: 'c1', type: 'trefoil/container', x: 0, y: 0, width: 300, height: 200 },
-      { id: 'p1', type: 'text', x: 10, y: 10, width: 120, height: 36, text: 'root', containerId: 'c1', treeParent: null, fontWeight: 600 },
-    );
-    doc.reindex();
-    const withDefaults = addSiblingNode(doc, 'c1', 'p1', { fontWeight: 700, fontFamily: 'Georgia' });
-    expect(doc.getNode(withDefaults!)).toMatchObject({ fontWeight: 700, fontFamily: 'Georgia' });
-    const fallback = addSiblingNode(doc, 'c1', 'p1', {});
-    expect(doc.getNode(fallback!)).toMatchObject({ fontWeight: 600 });
+  it('深色保证最小落差（深浅主题都可辨读）', () => {
+    expect(darkenColor('#1e1e1e')).toBe('#0f0f0f');
+  });
+
+  it('支持 rgb/rgba 并保留透明度；无法解析时原样返回', () => {
+    expect(darkenColor('rgb(255, 0, 0)')).toBe('#e00000');
+    expect(darkenColor('rgba(255, 255, 255, 0.5)')).toBe('rgba(230, 230, 230, 0.5)');
+    expect(darkenColor('rebeccapurple')).toBe('rebeccapurple');
+  });
+});
+
+describe('画布背景主题适配（effectiveBackground）', () => {
+  const base = { ...DEFAULT_SETTINGS.background };
+
+  it('夜间模式：使用夜间专用底色/点阵/网格', () => {
+    const out = effectiveBackground(base, 'dark');
+    expect(out.color).toBe('#1e1e1e');
+    expect(out.dotColor).toBe('#3f3f46');
+    expect(out.gridColor).toBe('#4a4a52');
+  });
+
+  it('夜间模式：自定义夜间色优先，日间色不受影响', () => {
+    const custom = { ...base, colorDark: '#112233', dotColorDark: '#445566', gridColor: '#654321' };
+    const out = effectiveBackground(custom, 'dark');
+    expect(out.color).toBe('#112233');
+    expect(out.dotColor).toBe('#445566');
+    // 夜间网格色未设置：回退「日间默认值 → 夜间默认」链
+    expect(out.gridColor).toBe('#4a4a52');
+    expect(custom.color).toBe('#ffffff');
+  });
+
+  it('日间模式原样返回（不修改）', () => {
+    expect(effectiveBackground(base, 'light')).toBe(base);
   });
 });

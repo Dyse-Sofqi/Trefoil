@@ -29,9 +29,10 @@ export class DevAdapter implements HostAdapter {
 
   palette(): ReturnType<typeof readPalette> {
     const dark = new URLSearchParams(location.search).get('theme') === 'dark';
-    // 深色变量定义在 dev.css 的 .theme-dark 下，靠 class 切换（避免逐个内联赋值）
-    document.documentElement.classList.toggle('theme-dark', dark);
-    return readPalette(document.documentElement);
+    // 深色变量定义在 dev.css 的 .theme-dark 下，靠 class 切换（避免逐个内联赋值）。
+    // class 挂 body（与 Obsidian 一致）——CanvasApp.themeKind() 读的就是 body 上的 theme-dark
+    document.body.classList.toggle('theme-dark', dark);
+    return readPalette(document.body);
   }
 
   async saveFile(name: string, data: string, mime: string): Promise<void> {
@@ -46,9 +47,9 @@ export class DevAdapter implements HostAdapter {
     el.textContent = msg;
     el.classList.add('trefoil-dev-toast');
     document.body.appendChild(el);
-    setTimeout(() => {
+    window.setTimeout(() => {
       el.classList.add('trefoil-dev-toast--hiding');
-      setTimeout(() => el.remove(), 400);
+      window.setTimeout(() => el.remove(), 400);
     }, 2200);
   }
 

@@ -13,3 +13,32 @@
   opacity: 0;
   pointer-events: none;
 }
+
+/* 画布底色兜底变量：Konva 首帧绘制前由 App 根元素铺底，避免闪白/闪黑。
+   由主题 class 决定，无需 JS 写入样式 */
+.trefoil-view {
+  --trefoil-canvas-bg: #ffffff;
+}
+.theme-dark .trefoil-view {
+  --trefoil-canvas-bg: #1e1e22;
+}
+
+/* 画布光标：按 CSS 类切换，不直接写 element.style（见 app/cursor.ts） */
+.trefoil-cursor-default {
+  cursor: default;
+}
+.trefoil-cursor-grab {
+  cursor: grab;
+}
+.trefoil-cursor-grabbing {
+  cursor: grabbing;
+}
+.trefoil-cursor-crosshair {
+  cursor: crosshair;
+}
+.trefoil-cursor-none {
+  cursor: none;
+}
+.trefoil-cursor-text {
+  cursor: text;
+}

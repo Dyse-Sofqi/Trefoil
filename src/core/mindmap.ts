@@ -1,207 +1,164 @@
 /**
- * 思维导图容器操作：子节点/兄弟节点增删、折叠展开、自动布局。
- * 容器内部遵循树形结构；treeParent=null 且 containerId 有值的节点为“森林根”。
+ * 导图（思维导图）核心操作。
+ *
+ * 结构约定：
+ * - 主节点：`mapRoot: true` 的节点，是导图的入口标记（属性面板「升级为导图主节点」写入）；
+ * - 成员资格：节点与导图的从属关系由 `kind: 'mindmap'` 的边决定（fromNode = 父，toNode = 子），
+ *   不依赖容器或节点上的父指针 —— 删边即脱离导图，删除节点时边随 Document.removeNodes 一起清理；
+ * - 快捷键：Tab 添加子节点、Enter 添加同级节点（新增节点一律为文本框），交互在 SelectTool / CanvasApp。
  */
-import type { Document } from './Document';
+import { Document } from './Document';
+import type { CanvasNode } from './types';
 import { uid } from './id';
-import { computeTreeLayout, type LayoutInput } from './layout';
 
-export interface LayoutResult {
-  positions: Record<string, { x: number; y: number }>;
-}
-
-export const CONTAINER_PADDING = 24;
-export const CONTAINER_TITLE_H = 28;
-
-/** 新建导图节点时可从「文本默认」继承的样式（缺省时回退到参考节点/内置值） */
-export interface MapNodeDefaults {
+/** 新建导图节点的文字样式（调用方按参考节点/全局文本默认解析好传入） */
+export interface MapNodeStyle {
   fontSize?: number;
   fontFamily?: string;
   fontWeight?: number;
   color?: string;
 }
 
-/** 添加子节点（Tab）；parentId 为 null 时新建根节点，返回新节点 id */
-export function addChildNode(doc: Document, containerId: string, parentId: string | null, defaults: MapNodeDefaults): string | null {
-  const parent = parentId ? doc.getNode(parentId) : null;
-  const baseX = parent ? parent.x + parent.width + 80 : 120;
-  const baseY = parent ? parent.y : 120;
-  const node = {
-    id: uid('n'),
-    type: 'text' as const,
-    x: baseX,
-    y: baseY + (doc.nodes.length % 3) * 44,
-    width: 120,
-    height: 36,
-    text: '',
-    containerId,
-    treeParent: parentId,
-    fontSize: defaults.fontSize ?? 14,
-    fontFamily: defaults.fontFamily,
-    fontWeight: defaults.fontWeight,
-    color: defaults.color,
-    hAlign: 'center' as const,
+/** 层级间距（父右缘 → 子左缘） */
+export const MAP_LEVEL_GAP = 80;
+/** 兄弟间距 */
+export const MAP_SIBLING_GAP = 16;
+/** 新建子节点的默认框形（文本框；高度在编辑提交后按内容自适应） */
+export const MAP_NODE_W = 120;
+export const MAP_NODE_H = 36;
+
+/**
+ * 参考节点带有实体边框时，新节点继承同款边框（颜色 / 粗细 / 线型 / 圆角）；
+ * 无边框则什么都不带 —— 避免把未生效的边框参数提前种进新节点。
+ */
+function inheritBorder(from: CanvasNode): Partial<CanvasNode> {
+  if (!from.border) return {};
+  return {
+    border: true,
+    stroke: from.stroke,
+    strokeSize: from.strokeSize,
+    borderStyle: from.borderStyle,
+    borderRadius: from.borderRadius,
   };
+}
+
+/** 导图成员：主节点，或任意 mindmap 边的端点 */
+export function isMapMember(doc: Document, id: string): boolean {
+  if (doc.getNode(id)?.mapRoot) return true;
+  return doc.edges.some((e) => e.kind === 'mindmap' && (e.fromNode === id || e.toNode === id));
+}
+
+/** 导图父节点（沿 mindmap 边向上）；主节点/游离节点返回 null */
+export function mapParentId(doc: Document, id: string): string | null {
+  const e = doc.edges.find((e) => e.kind === 'mindmap' && e.toNode === id);
+  return e ? e.fromNode : null;
+}
+
+/** 导图子节点 id（按边数组顺序） */
+export function mapChildIds(doc: Document, id: string): string[] {
+  return doc.edges.filter((e) => e.kind === 'mindmap' && e.fromNode === id).map((e) => e.toNode);
+}
+
+/** 升级为导图主节点：仅写入入口标记 */
+export function upgradeToMapRoot(doc: Document, id: string): void {
+  const n = doc.getNode(id);
+  if (!n || n.mapRoot) return;
+  doc.updateNode(id, { mapRoot: true }, '升级为导图主节点');
+}
+
+/** 取消导图主节点：清除标记，子树内所有 mindmap 边转为普通连线（保留连接，仅去掉导图语义） */
+export function downgradeMapRoot(doc: Document, rootId: string): void {
+  const root = doc.getNode(rootId);
+  if (!root?.mapRoot) return;
+  const ids = subtreeIds(doc, rootId);
+  doc.mutate('取消导图主节点', () => {
+    root.mapRoot = false;
+    for (const e of doc.edges) {
+      if (e.kind === 'mindmap' && ids.has(e.fromNode)) delete e.kind;
+    }
+  });
+}
+
+/**
+ * 添加子节点（Tab）：文本框落在父节点右侧新一层，纵向排在现有子节点的最下方；
+ * 容器归属、文字样式继承父节点。仅导图成员（主节点或 mindmap 边端点）可加子节点。
+ * 返回新节点 id，由调用方选中并进入编辑。
+ */
+export function addMapChild(doc: Document, parentId: string, style: MapNodeStyle): string | null {
+  const parent = doc.getNode(parentId);
+  if (!parent || !isMapMember(doc, parentId)) return null;
+  let bottom: number | null = null;
+  for (const cid of mapChildIds(doc, parentId)) {
+    const k = doc.getNode(cid);
+    if (k) bottom = bottom === null ? k.y + k.height : Math.max(bottom, k.y + k.height);
+  }
+  const node = Document.newNode({
+    type: 'text',
+    x: Math.round(parent.x + parent.width + MAP_LEVEL_GAP),
+    y: Math.round(bottom !== null ? bottom + MAP_SIBLING_GAP : parent.y + parent.height / 2 - MAP_NODE_H / 2),
+    width: MAP_NODE_W,
+    height: MAP_NODE_H,
+    text: '',
+    containerId: parent.containerId ?? null,
+    hAlign: 'center',
+    fontSize: style.fontSize ?? parent.fontSize ?? 16,
+    fontFamily: style.fontFamily ?? parent.fontFamily,
+    fontWeight: style.fontWeight ?? parent.fontWeight,
+    color: style.color ?? parent.color,
+    ...inheritBorder(parent),
+  });
   doc.mutate('添加子节点', () => {
     doc.nodes.push(node);
-    if (parent) {
-      doc.edges.push({
-        id: uid('e'),
-        fromNode: parent.id,
-        toNode: node.id,
-        kind: 'mindmap',
-      });
-    }
+    doc.edges.push({ id: uid('e'), fromNode: parentId, toNode: node.id, kind: 'mindmap' });
     doc.reindex();
   });
   return node.id;
 }
 
-/** 添加兄弟节点（Enter），返回新节点 id */
-export function addSiblingNode(doc: Document, containerId: string, nodeId: string, defaults: MapNodeDefaults): string | null {
+/**
+ * 添加同级节点（Enter）：文本框落在参考节点正下方，容器归属、样式与框形继承参考节点。
+ * 参考节点没有导图父节点（是主节点或游离节点）时返回 null —— 主节点应按 Tab 添加子节点。
+ */
+export function addMapSibling(doc: Document, nodeId: string, style: MapNodeStyle): string | null {
   const ref = doc.getNode(nodeId);
-  if (!ref || !ref.containerId) return null;
-  const treeParent = ref.treeParent;
-  if (!treeParent) {
-    // 兄弟位于顶层：新建森林根
-    const node = {
-      id: uid('n'),
-      type: 'text' as const,
-      x: ref.x,
-      y: ref.y + ref.height + 24,
-      width: ref.width,
-      height: ref.height,
-      text: '',
-      containerId,
-      treeParent: null,
-      fontSize: defaults.fontSize ?? ref.fontSize ?? 14,
-      fontFamily: defaults.fontFamily ?? ref.fontFamily,
-      fontWeight: defaults.fontWeight ?? ref.fontWeight,
-      color: ref.color,
-      hAlign: 'center' as const,
-    };
-    doc.mutate('添加节点', () => {
-      doc.nodes.push(node);
-      doc.reindex();
-    });
-    return node.id;
-  }
-  const node = {
-    id: uid('n'),
-    type: 'text' as const,
-    x: ref.x,
-    y: ref.y + ref.height + 12,
+  if (!ref) return null;
+  const parentId = mapParentId(doc, nodeId);
+  if (!parentId) return null;
+  const node = Document.newNode({
+    type: 'text',
+    x: Math.round(ref.x),
+    y: Math.round(ref.y + ref.height + MAP_SIBLING_GAP),
     width: ref.width,
     height: ref.height,
     text: '',
-    containerId,
-    treeParent,
-    fontSize: defaults.fontSize ?? ref.fontSize ?? 14,
-    fontFamily: defaults.fontFamily ?? ref.fontFamily,
-    fontWeight: defaults.fontWeight ?? ref.fontWeight,
-    color: ref.color,
-    hAlign: 'center' as const,
-  };
-  doc.mutate('添加兄弟节点', () => {
+    containerId: ref.containerId ?? null,
+    hAlign: 'center',
+    fontSize: style.fontSize ?? ref.fontSize ?? 16,
+    fontFamily: style.fontFamily ?? ref.fontFamily,
+    fontWeight: style.fontWeight ?? ref.fontWeight,
+    color: style.color ?? ref.color,
+    ...inheritBorder(ref),
+  });
+  doc.mutate('添加同级节点', () => {
     doc.nodes.push(node);
-    doc.edges.push({
-      id: uid('e'),
-      fromNode: treeParent,
-      toNode: node.id,
-      kind: 'mindmap',
-    });
+    doc.edges.push({ id: uid('e'), fromNode: parentId, toNode: node.id, kind: 'mindmap' });
     doc.reindex();
   });
   return node.id;
 }
 
-/** 删除导图节点及其子树（容器内部） */
-export function deleteSubtree(doc: Document, nodeId: string): void {
-  const ids = new Set<string>();
-  const collect = (id: string) => {
-    ids.add(id);
-    for (const c of doc.nodes.filter((n) => n.treeParent === id)) collect(c.id);
-  };
-  collect(nodeId);
-  doc.mutate('删除节点', () => {
-    doc.nodes = doc.nodes.filter((n) => !ids.has(n.id));
-    doc.edges = doc.edges.filter((e) => !ids.has(e.fromNode) && !ids.has(e.toNode));
-    doc.reindex();
-    for (const id of ids) doc.selection.delete(id);
-  });
-}
-
-/** 折叠/展开（Space） */
-export function toggleCollapse(doc: Document, nodeId: string): void {
-  const n = doc.getNode(nodeId);
-  if (!n) return;
-  const collapsed = !n.collapsed;
-  doc.updateNode(nodeId, { collapsed }, '折叠/展开');
-}
-
-/** 以 rootId 为根整理树形布局（horizontal/vertical） */
-export function layoutSubtree(doc: Document, rootId: string, direction: 'horizontal' | 'vertical', positions?: Record<string, { x: number; y: number }>): void {
-  const root = doc.getNode(rootId);
-  if (!root) return;
-
-  let pos: Record<string, { x: number; y: number }>;
-  if (positions) {
-    pos = positions;
-  } else {
-    const input = buildLayoutInput(doc, rootId, direction, root.x, root.y);
-    pos = computeTreeLayout(input);
-  }
-
-  doc.mutate('自动布局', () => {
-    for (const [id, p] of Object.entries(pos)) {
-      const n = doc.getNode(id);
-      if (n) {
-        n.x = p.x;
-        n.y = p.y;
+/** 子树成员（沿 mindmap 边向下收集，防环） */
+function subtreeIds(doc: Document, rootId: string): Set<string> {
+  const ids = new Set<string>([rootId]);
+  const queue = [rootId];
+  while (queue.length) {
+    const id = queue.shift()!;
+    for (const cid of mapChildIds(doc, id)) {
+      if (!ids.has(cid)) {
+        ids.add(cid);
+        queue.push(cid);
       }
     }
-    fitContainerToChildren(doc, root.containerId ?? undefined);
-  });
-}
-
-export function buildLayoutInput(doc: Document, rootId: string, direction: 'horizontal' | 'vertical', rootX: number, rootY: number): LayoutInput {
-  const nodes: LayoutInput['nodes'] = {};
-  const collect = (id: string) => {
-    const n = doc.getNode(id);
-    if (!n) return;
-    nodes[id] = { id, width: n.width, height: n.height, children: doc.treeChildren(id).map((c) => c.id) };
-    for (const c of doc.treeChildren(id)) collect(c.id);
-  };
-  collect(rootId);
-  return { rootId, nodes, direction, rootX, rootY };
-}
-
-/** 容器边框收缩到子节点范围（保持至少 200x140） */
-export function fitContainerToChildren(doc: Document, containerId?: string | null): void {
-  if (!containerId) return;
-  const container = doc.getNode(containerId);
-  if (!container) return;
-  const children = doc.containerChildren(containerId);
-  if (!children.length) return;
-  let minX = Infinity,
-    minY = Infinity,
-    maxX = -Infinity,
-    maxY = -Infinity;
-  for (const c of children) {
-    minX = Math.min(minX, c.x);
-    minY = Math.min(minY, c.y);
-    maxX = Math.max(maxX, c.x + c.width);
-    maxY = Math.max(maxY, c.y + c.height);
   }
-  const pad = CONTAINER_PADDING + CONTAINER_TITLE_H;
-  const target = {
-    x: minX - pad,
-    y: minY - pad,
-    width: Math.max(200, maxX - minX + pad * 2),
-    height: Math.max(140, maxY - minY + pad * 2),
-  };
-  container.x = target.x;
-  container.y = target.y;
-  container.width = target.width;
-  container.height = target.height;
+  return ids;
 }

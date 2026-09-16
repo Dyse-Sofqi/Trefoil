@@ -9,6 +9,7 @@ import { Emitter } from './events';
 import type { CanvasDoc, CanvasEdge, CanvasNode } from './types';
 import { uid } from './id';
 import type { Command } from './History';
+import { freezeBoundArrows } from './arrowLink';
 
 export interface DocEvents {
   changed: { live: boolean };
@@ -22,7 +23,7 @@ export interface DocSnapshot {
   edges: CanvasEdge[];
 }
 
-/** 缩放会话的起始尺寸记录（含可选翻转状态，供撤销/重做还原） */
+/** 缩放会话的起始尺寸记录（含可选翻转状态与线类折点，供撤销/重做还原） */
 export interface ResizeStartRecord {
   x: number;
   y: number;
@@ -30,6 +31,11 @@ export interface ResizeStartRecord {
   height: number;
   flipX?: boolean;
   flipY?: boolean;
+  /** 线类节点（直线/箭头/折线）的折点快照：端点拖拽/缩放后 bbox 与 points 必须一起回滚 */
+  points?: number[][];
+  /** 端点磁吸绑定快照：拖绑定端会解除绑定，撤销时需一并还原 */
+  fromNode?: string | null;
+  toNode?: string | null;
 }
 
 export class Document {
@@ -72,33 +78,6 @@ export class Document {
   /** 容器的直接子节点 */
   containerChildren(containerId: string): CanvasNode[] {
     return this.nodes.filter((n) => n.containerId === containerId);
-  }
-
-  /** 导图树：某节点的子节点（按当前视觉位置排序，从左到右/从上到下） */
-  treeChildren(parentId: string): CanvasNode[] {
-    return this.nodes
-      .filter((n) => n.treeParent === parentId)
-      .sort((a, b) => (Math.abs(a.y - b.y) > 8 ? a.y - b.y : a.x - b.x));
-  }
-
-  /** 折叠状态下是否应隐藏（任一祖先 collapsed） */
-  isHiddenByCollapse(n: CanvasNode): boolean {
-    let p = n.treeParent;
-    const guard = new Set<string>();
-    while (p && !guard.has(p)) {
-      guard.add(p);
-      const parent = this.getNode(p);
-      if (!parent) break;
-      if (parent.collapsed) return true;
-      p = parent.treeParent;
-    }
-    return false;
-  }
-
-  ancestorsCollapsedOf(containerId: string | null | undefined): boolean {
-    if (!containerId) return false;
-    const c = this.getNode(containerId);
-    return !!c && !!c.collapsed;
   }
 
   /** 展开 selection 到整组（绑定组整体操作） */
@@ -247,7 +226,19 @@ export class Document {
     const end: Map<string, ResizeStartRecord> = new Map();
     for (const id of starts.keys()) {
       const n = doc.getNode(id);
-      if (n) end.set(id, { x: n.x, y: n.y, width: n.width, height: n.height, flipX: n.flipX, flipY: n.flipY });
+      if (n) {
+        end.set(id, {
+          x: n.x,
+          y: n.y,
+          width: n.width,
+          height: n.height,
+          flipX: n.flipX,
+          flipY: n.flipY,
+          points: n.points ? n.points.map((p) => [...p]) : undefined,
+          fromNode: n.fromNode,
+          toNode: n.toNode,
+        });
+      }
     }
     return {
       label,
@@ -264,6 +255,9 @@ export class Document {
               n.height = sz.height;
               if (sz.flipX !== undefined) n.flipX = sz.flipX;
               if (sz.flipY !== undefined) n.flipY = sz.flipY;
+              if (sz.points) n.points = sz.points.map((p) => [...p]);
+              if (sz.fromNode !== undefined) n.fromNode = sz.fromNode ?? undefined;
+              if (sz.toNode !== undefined) n.toNode = sz.toNode ?? undefined;
             }
           }
         }),
@@ -278,6 +272,9 @@ export class Document {
             n.height = e.height;
             if (e.flipX !== undefined) n.flipX = e.flipX;
             if (e.flipY !== undefined) n.flipY = e.flipY;
+            if (e.points) n.points = e.points.map((p) => [...p]);
+            if (e.fromNode !== undefined) n.fromNode = e.fromNode || undefined;
+            if (e.toNode !== undefined) n.toNode = e.toNode || undefined;
           }
         }),
     };
@@ -300,6 +297,8 @@ export class Document {
       const removedContainers = new Set(
         this.nodes.filter((n) => set.has(n.id) && n.type === 'trefoil/container').map((n) => n.id),
       );
+      // 指向被删元素的绑定箭头先冻结为普通直线（锚点固化、绑定清除）
+      freezeBoundArrows(this.nodes, (id) => this.nodeIndex.get(id), set);
       this.nodes = this.nodes.filter((n) => !set.has(n.id));
       this.edges = this.edges.filter((e) => !set.has(e.fromNode) && !set.has(e.toNode));
       // 被删除容器的子节点转为自由元素
@@ -307,7 +306,6 @@ export class Document {
         for (const n of this.nodes) {
           if (n.containerId && removedContainers.has(n.containerId)) {
             n.containerId = null;
-            n.treeParent = null;
           }
         }
       }
@@ -333,6 +331,24 @@ export class Document {
     this.mutate('连线', () => {
       this.edges.push(edge);
       this.reindex();
+    });
+  }
+
+  removeEdges(ids: Iterable<string>): void {
+    const set = new Set(ids);
+    if (!set.size) return;
+    this.mutate('删除连线', () => {
+      this.edges = this.edges.filter((e) => !set.has(e.id));
+      this.reindex();
+      for (const id of set) this.selection.delete(id);
+    });
+  }
+
+  /** 连线字段更新（如关系描述 label） */
+  updateEdge(id: string, patch: Partial<CanvasEdge>, label = '修改连线'): void {
+    this.mutate(label, () => {
+      const e = this.edgeIndex.get(id);
+      if (e) Object.assign(e, patch);
     });
   }
 

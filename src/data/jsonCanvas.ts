@@ -5,7 +5,8 @@
  * - 未知节点类型按规范要求原样保留。
  */
 import type { CanvasDoc, CanvasEdge, CanvasNode } from '../core/types';
-import { isContainerNode } from '../core/types';
+import { isContainerNode, isLineLike } from '../core/types';
+import { normalizeLineBBox } from '../core/resize';
 
 type JcRecord = Record<string, unknown>;
 
@@ -18,8 +19,12 @@ export function createEmptyDocJson(): string {
 const NODE_EXT_FIELDS = [
   'shape',
   'fill',
+  'fillOpacity',
   'stroke',
   'strokeSize',
+  'border',
+  'borderStyle',
+  'borderRadius',
   'opacity',
   'fontFamily',
   'fontSize',
@@ -29,12 +34,17 @@ const NODE_EXT_FIELDS = [
   'flipX',
   'flipY',
   'points',
+  'headStyle',
+  'tailStyle',
+  'fromNode',
+  'toNode',
+  'label',
+  'strokeStyle',
+  'caption',
   'fileSize',
   'containerId',
-  'treeParent',
-  'collapsed',
-  'layout',
   'groupId',
+  'mapRoot',
 ] as const;
 
 const EDGE_EXT_FIELDS = ['kind'] as const;
@@ -119,8 +129,9 @@ export function parseDoc(json: string): CanvasDoc {
       if (v !== undefined) (n as unknown as Record<string, unknown>)[f] = v;
     }
     if (n.containerId === '') n.containerId = null;
-    if (n.treeParent === '') n.treeParent = null;
     if (n.groupId === '') n.groupId = null;
+    // 线类节点：把包围盒收紧到折点实际范围（修复旧版撤销不记 points 造成的脱节残留）
+    if (isLineLike(n)) normalizeLineBBox(n);
     nodes.push(n);
   }
 
@@ -150,10 +161,8 @@ export function parseDoc(json: string): CanvasDoc {
     if (typeof re.toSide === 'string') e.toSide = re.toSide as CanvasEdge['toSide'];
     if (typeof re.color === 'string') e.color = re.color;
     if (typeof re.label === 'string') e.label = re.label;
-    for (const f of EDGE_EXT_FIELDS) {
-      const v = re[`trefoil:${f}`];
-      if (v !== undefined) (e as unknown as Record<string, unknown>)[f] = v;
-    }
+    const kind = re[`trefoil:kind`] ?? re.kind;
+    if (typeof kind === 'string') e.kind = kind as CanvasEdge['kind'];
     edges.push(e);
   }
 

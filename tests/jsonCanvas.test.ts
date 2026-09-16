@@ -113,4 +113,90 @@ describe('JSON Canvas 序列化', () => {
     expect(parseDoc('not json')).toEqual({ nodes: [], edges: [] });
     expect(parseDoc('null')).toEqual({ nodes: [], edges: [] });
   });
+
+  it('文本框实体边框字段经 trefoil: 前缀往返保留', () => {
+    const doc: CanvasDoc = {
+      nodes: [
+        {
+          id: 't1',
+          type: 'text',
+          x: 10,
+          y: 20,
+          width: 120,
+          height: 40,
+          text: '带边框',
+          border: true,
+          borderStyle: 'dashed',
+          stroke: '#ff0000',
+          strokeSize: 3,
+          borderRadius: 8,
+          fill: '#ffffff',
+        },
+        { id: 't2', type: 'text', x: 0, y: 0, width: 100, height: 30, text: '无边框', border: false },
+      ],
+      edges: [],
+    };
+    const raw = JSON.parse(serializeDoc(doc));
+    expect(raw.nodes[0]['trefoil:border']).toBe(true);
+    expect(raw.nodes[0]['trefoil:borderStyle']).toBe('dashed');
+    expect(raw.nodes[0]['trefoil:borderRadius']).toBe(8);
+    expect(raw.nodes[0]['trefoil:fill']).toBe('#ffffff');
+
+    const parsed = parseDoc(serializeDoc(doc));
+    expect(parsed.nodes[0]).toMatchObject({
+      border: true,
+      borderStyle: 'dashed',
+      stroke: '#ff0000',
+      strokeSize: 3,
+      borderRadius: 8,
+      fill: '#ffffff',
+    });
+    // border: false 不落盘（序列化跳过 falsy），读回即为关闭
+    expect(parsed.nodes[1]?.border).toBeFalsy();
+    expect(parsed.nodes[1]?.stroke).toBeUndefined();
+  });
+
+  it('文本框无填充时 fill 不落盘（borderStyle 关边框后保留）', () => {
+    const doc: CanvasDoc = {
+      nodes: [
+        { id: 't1', type: 'text', x: 0, y: 0, width: 100, height: 30, text: 'x', fill: null },
+        { id: 't2', type: 'text', x: 0, y: 0, width: 100, height: 30, text: 'y', border: true, borderStyle: 'solid', fill: '3' },
+      ],
+      edges: [],
+    };
+    const raw = JSON.parse(serializeDoc(doc));
+    expect(raw.nodes[0]['trefoil:fill']).toBeUndefined();
+    // 预设色编号原样写出；线型为合法字符串照常落盘（关边框后参数保留，重开即还原）
+    expect(raw.nodes[1]['trefoil:fill']).toBe('3');
+    expect(raw.nodes[1]['trefoil:borderStyle']).toBe('solid');
+  });
+
+  it('文本框预设色边框原样写出', () => {
+    const doc: CanvasDoc = {
+      nodes: [{ id: 't1', type: 'text', x: 0, y: 0, width: 100, height: 30, text: 'x', border: true, stroke: '5' }],
+      edges: [],
+    };
+    const parsed = parseDoc(serializeDoc(doc));
+    expect(parsed.nodes[0]?.stroke).toBe('5');
+  });
+
+  it('容器背景色 / 背景透明度 / 圆角往返保留（fillOpacity = 0 也要落盘）', () => {
+    const doc: CanvasDoc = {
+      nodes: [
+        { id: 'c1', type: 'trefoil/container', x: 0, y: 0, width: 300, height: 200, text: '组', fill: '#4c8dff', fillOpacity: 0.35, borderRadius: 24 },
+        // 0 是「全透明」这一合法取值，不能被序列化的 falsy 过滤吃掉
+        { id: 'c2', type: 'trefoil/container', x: 0, y: 0, width: 100, height: 100, fill: '3', fillOpacity: 0 },
+      ],
+      edges: [],
+    };
+    const raw = JSON.parse(serializeDoc(doc));
+    expect(raw.nodes[0]['trefoil:fill']).toBe('#4c8dff');
+    expect(raw.nodes[0]['trefoil:fillOpacity']).toBe(0.35);
+    expect(raw.nodes[0]['trefoil:borderRadius']).toBe(24);
+    expect(raw.nodes[1]['trefoil:fillOpacity']).toBe(0);
+
+    const parsed = parseDoc(serializeDoc(doc));
+    expect(parsed.nodes[0]).toMatchObject({ fill: '#4c8dff', fillOpacity: 0.35, borderRadius: 24 });
+    expect(parsed.nodes[1]).toMatchObject({ fill: '3', fillOpacity: 0 });
+  });
 });

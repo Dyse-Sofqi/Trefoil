@@ -83,7 +83,7 @@ export class TrefoilView extends ItemView {
 
     const dark = document.body.classList.contains('theme-dark');
     const initial = trefoilSettingsFromPlugin(this.settings, dark);
-    content.style.setProperty('--trefoil-canvas-bg', dark ? '#1e1e22' : '#ffffff');
+    // 画布底色兜底变量由 styles.css 按主题 class 提供，无需写入元素样式
 
     this.svelteApp = mount(App, {
       target: content,

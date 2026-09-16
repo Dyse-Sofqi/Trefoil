@@ -22,6 +22,8 @@ export const ui = $state({
   rev: 0,
   /** 视口版本号：平移/缩放时递增，编辑覆盖层据此跟随 */
   vpRev: 0,
+  /** 线段关系描述内联编辑（双击连线/绑定箭头触发），App 层渲染输入框 */
+  labelEdit: null as { kind: 'edge' | 'node'; id: string; x: number; y: number; value: string } | null,
   elementCount: 0,
 });
 

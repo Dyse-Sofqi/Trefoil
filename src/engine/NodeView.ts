@@ -3,8 +3,11 @@ import Konva from 'konva';
 import type { CanvasNode } from '../core/types';
 import { rectContains, type Rect } from '../core/geometry';
 import { isContainerNode, isFileNode, isLineLike, isShapeNode, isTextNode } from '../core/types';
+import { CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from '../core/defaults';
 import type { Palette } from './palette';
 import { resolveColor } from './palette';
+import { arrowHeadParts, addHeadShapes, headLength } from './arrowHead';
+import { arrowCurve, cubicMidpoint, dashArray, polylineMidpoint, sampleCubic, trimCubicEnd, trimCubicStart } from '../core/arrowLink';
 import { fontString, fontVerticalMetrics, layoutText } from './textMeasure';
 import { ImageView } from './ImageView';
 import type { ImageCache as ImageCacheApi } from './imageCache';
@@ -20,8 +23,15 @@ export const TEXT_PADDING = 6;
 /** 容器左上角名片（名称牌）：字号与相对容器上沿的间距 */
 export const CONTAINER_PLATE_FONT = 12;
 export const CONTAINER_PLATE_GAP = 4;
-/** 「已折叠」小标签字号 */
-const CONTAINER_TAG_FONT = 11;
+
+/** 图片描述牌：字号与距图片下沿的间距（屏幕像素，随视口缩放反向缩放保持恒定） */
+export const CAPTION_FONT = 12;
+export const CAPTION_GAP = 6;
+
+/** file 字段 → 默认描述（库路径 basename，去扩展名） */
+export function fileCaption(file: string): string {
+  return (file.split('/').pop() ?? '').replace(/\.[^.]+$/, '');
+}
 
 /**
  * 文本 LOD 阈值（屏幕上的字号，px）：小于此值字形已无法辨读，
@@ -46,6 +56,15 @@ interface TextLineDraw {
   segs: TextSegDraw[];
 }
 
+/** 文本框实体边框（border 开启时非空） */
+interface TextBorder {
+  color: string;
+  /** 线宽（世界单位）；实际绘制时夹取到不超过框的短边 */
+  width: number;
+  /** 线型：solid 实线 / dashed 虚线 / dotted 点状（未知值按 solid 处理） */
+  style: 'solid' | 'dashed' | 'dotted';
+}
+
 interface TextDraw {
   fontSize: number;
   /** 行距（字号 × 1.5）：字形在行距槽内居中，行距不会全部堆到文字下方 */
@@ -57,14 +76,34 @@ interface TextDraw {
   hasText: boolean;
   color: string;
   lines: TextLineDraw[];
+  /** 背景填充色（fill 未设置时为 null，背景透明） */
+  fill: string | null;
+  border: TextBorder | null;
+  /** 背景/边框共用的圆角半径；实际绘制时夹取到框内可达的最大值 */
+  cornerRadius: number;
 }
 
 /** 影响渲染结果的字段（按节点类型区分）：逐字段比较代替序列化整条数据 */
-const TEXT_VISUAL_FIELDS: readonly string[] = ['text', 'width', 'height', 'fontFamily', 'fontSize', 'fontWeight', 'color', 'hAlign'];
-const CONTAINER_VISUAL_FIELDS: readonly string[] = ['text', 'width', 'height', 'collapsed'];
-const FILE_VISUAL_FIELDS: readonly string[] = ['file', 'width', 'height'];
+const TEXT_VISUAL_FIELDS: readonly string[] = [
+  'text',
+  'width',
+  'height',
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'color',
+  'hAlign',
+  'fill',
+  'border',
+  'borderStyle',
+  'stroke',
+  'strokeSize',
+  'borderRadius',
+];
+const CONTAINER_VISUAL_FIELDS: readonly string[] = ['text', 'width', 'height', 'fill', 'fillOpacity', 'borderRadius'];
+const FILE_VISUAL_FIELDS: readonly string[] = ['file', 'width', 'height', 'caption'];
 // 注意：points 按数组引用比较，调用方需整体替换数组（tools 均如此），不得原地 push
-const SHAPE_VISUAL_FIELDS: readonly string[] = ['shape', 'fill', 'stroke', 'strokeSize', 'width', 'height', 'points', 'flipX', 'flipY'];
+const SHAPE_VISUAL_FIELDS: readonly string[] = ['shape', 'fill', 'stroke', 'strokeSize', 'width', 'height', 'points', 'flipX', 'flipY', 'headStyle', 'tailStyle', 'fromNode', 'toNode', 'label', 'strokeStyle'];
 
 /** file 字段（库内路径）→ 可加载 URL；返回 null 表示宿主判定文件确实缺失 */
 export type FileUrlResolver = (raw: string) => string | null | undefined;
@@ -84,10 +123,13 @@ export class NodeView {
   private inner: Konva.Group = new Konva.Group();
   /** 文本绘制数据（仅文本节点） */
   private textDraw: TextDraw | null = null;
-  /** 容器名片（Konva 标签，宽度由 Konva 按文本自适应）与它的命中矩形（节点局部坐标） */
-  private plateLabel: Konva.Label | null = null;
-  private plateHit: Rect | null = null;
-  /** 当前视口缩放（由引擎在视口变化时同步，用于 LOD 判定；绘制时读取，无需重建） */
+  /** 容器名片（按 1/视口缩放反向缩放的组）与内部文字标签、底色块（节点局部坐标） */
+  private plateGroup: Konva.Group | null = null;
+  /** 图片描述牌（同样按 1/视口缩放反向缩放，挂在图片下沿） */
+  private captionGroup: Konva.Group | null = null;
+  private plateTag: Konva.Tag | null = null;
+  private plateSize: { width: number; height: number } | null = null;
+  /** 当前视口缩放（由引擎在视口变化时同步，用于 LOD 与名片反向缩放） */
   private scale = 1;
   /** 文本位图缓存（引擎注入）；未注入时逐帧矢量绘制 */
   private textRaster: TextRasterCache | null;
@@ -95,6 +137,9 @@ export class NodeView {
   private readonly uid = ++NODE_VIEW_SEQ;
   /** 文本视觉状态修订号：rebuild 时自增，作为位图缓存 key 的一部分 */
   private textRev = 0;
+  /** 双端绑定的贝塞尔路径（世界坐标扁平数组，由 Engine 在渲染时传入）；无绑定为 null */
+  private curve: number[] | null = null;
+  private curveKey = '';
 
   constructor(
     node: CanvasNode,
@@ -102,6 +147,7 @@ export class NodeView {
     private imageCache: ImageCacheApi,
     fileUrlResolver: FileUrlResolver | null = null,
     textRaster: TextRasterCache | null = null,
+    private getPlateBg: (() => string) | null = null,
   ) {
     this.node = node;
     this.palette = palette;
@@ -142,9 +188,14 @@ export class NodeView {
     this.snap = snap;
   }
 
-  update(node: CanvasNode): void {
+  update(node: CanvasNode, opts: { curve?: number[] | null } = {}): void {
     this.node = node;
-    if (this.visualChanged(node)) {
+    // 曲线在视觉字段之外（由绑定元素的当前位置推导），单独比较决定是否重建
+    const curveKey = opts.curve ? opts.curve.map((v) => Math.round(v * 100)).join(',') : '';
+    const curveChanged = curveKey !== this.curveKey;
+    this.curveKey = curveKey;
+    this.curve = opts.curve ?? null;
+    if (curveChanged || this.visualChanged(node)) {
       this.rebuild();
     }
     const g = this.group;
@@ -155,10 +206,26 @@ export class NodeView {
     }
   }
 
-  /** 视口缩放同步：LOD 在绘制时读取，跨阈值时无需重建场景图 */
+  /** 视口缩放同步：LOD 在绘制时读取；容器名片按 1/scale 反向缩放，屏幕尺寸保持恒定 */
   setScale(scale: number): void {
     this.scale = scale;
-    this.plateLabel?.visible(scale * CONTAINER_PLATE_FONT >= TEXT_BLOCK_MIN_PX);
+    const inv = 1 / scale;
+    const g = this.plateGroup;
+    if (g) {
+      if (Math.abs(g.scaleX() - inv) > 1e-9) g.scale({ x: inv, y: inv });
+    }
+    const c = this.captionGroup;
+    if (c) {
+      if (Math.abs(c.scaleX() - inv) > 1e-9) c.scale({ x: inv, y: inv });
+      // 水平居中：子坐标在「屏幕像素」单位下，图片中线 = 世界宽度一半 × 缩放
+      const label = c.getChildren()[0] as Konva.Label | undefined;
+      label?.x((this.node.width * scale) / 2);
+    }
+  }
+
+  /** 画布底色变化（设置面板改色）：只更新名片底色，无需重建 */
+  setPlateBg(color: string): void {
+    this.plateTag?.fill(color);
   }
 
   setHidden(hidden: boolean): void {
@@ -171,8 +238,10 @@ export class NodeView {
     this.textRev++;
     this.group.destroyChildren();
     this.textDraw = null;
-    this.plateLabel = null;
-    this.plateHit = null;
+    this.plateGroup = null;
+    this.captionGroup = null;
+    this.plateTag = null;
+    this.plateSize = null;
     this.imageView = null;
     const n = this.node;
     // 形状/图片翻转：子元素装入内层组，缩放 -1 并平移回包围盒内（镜像直观且无损）
@@ -211,6 +280,16 @@ export class NodeView {
     const layout = layoutText(n.text ?? '', Math.max(20, n.width - TEXT_PADDING * 2), fontSize, family, baseWeight);
     const color = resolveColor(n.color, this.palette) ?? this.palette.text;
     const align = n.hAlign ?? 'left';
+    // 背景/实体边框：颜色与粗细和形状描边共用字段；未显式设置时回落到新形状默认描边
+    const fill = n.fill ? (resolveColor(n.fill, this.palette) ?? null) : null;
+    const border: TextBorder | null = n.border
+      ? {
+          color: resolveColor(n.stroke, this.palette) ?? this.palette.nodeStroke,
+          width: Math.max(1, n.strokeSize ?? 2),
+          style: n.borderStyle === 'dashed' || n.borderStyle === 'dotted' ? n.borderStyle : 'solid',
+        }
+      : null;
+    const cornerRadius = Math.max(0, n.borderRadius ?? 0);
     // 垂直方向恒为居中：文本框高度本就贴合内容（autoTextHeight），上下留白对称
     const startY = Math.max(TEXT_PADDING, (n.height - layout.height) / 2);
 
@@ -251,6 +330,9 @@ export class NodeView {
       hasText: (n.text ?? '').trim().length > 0,
       color,
       lines,
+      fill,
+      border,
+      cornerRadius,
     };
     this.inner.add(
       new Konva.Shape({
@@ -262,15 +344,19 @@ export class NodeView {
 
   private drawText(ctx: Konva.Context): void {
     const d = this.textDraw;
-    if (!d || !d.hasText) return;
+    // 空文本且无背景/边框：不画任何东西（空白节点在画布上不可见，保持原有行为）
+    if (!d || (!d.hasText && !d.border && !d.fill)) return;
     const g = rawContext(ctx);
-    // 深缩放：字形已不可辨读，绘制占位块（比位图更省，且视觉上没差别）
+    // 深缩放：字形已不可辨读，画占位块（比位图更省）；背景/边框廉价，保持矢量绘制不消失
     if (d.fontSize * this.scale < TEXT_BLOCK_MIN_PX) {
-      g.save();
-      g.globalAlpha = TEXT_BLOCK_ALPHA * this.group.opacity();
-      g.fillStyle = d.color;
-      g.fillRect(0, 0, d.width, d.height);
-      g.restore();
+      paintFrame(g, d);
+      if (d.hasText) {
+        g.save();
+        g.globalAlpha = TEXT_BLOCK_ALPHA * this.group.opacity();
+        g.fillStyle = d.color;
+        g.fillRect(0, 0, d.width, d.height);
+        g.restore();
+      }
       return;
     }
     // 位图优先：命中缓存时每帧只剩一次 drawImage，节点数再多也不怕
@@ -306,6 +392,8 @@ export class NodeView {
   private paintText(g: CanvasRenderingContext2D, k: number, d: TextDraw): void {
     g.save();
     if (k !== 1) g.scale(k, k);
+    // 背景与边框先画，压在文字下方；与文本一起进入位图缓存（textRev 随 rebuild 自增，改样式即失效重画）
+    paintFrame(g, d);
     g.textBaseline = 'middle';
     g.textAlign = 'left';
     const half = d.lineHeight / 2 + d.shift; // 墨迹居中对齐行距槽（此前按字号取半，行距全落在文字下方）
@@ -344,6 +432,22 @@ export class NodeView {
     // 图片就绪（含失败）后重绘本节点所在层
     this.imageView.setData({ url, width: Math.max(1, n.width), height: Math.max(1, n.height), label });
     this.inner.add(shape);
+
+    // 图片描述牌：图片下沿，内容 = 自定义 caption（空串隐藏）缺省文件名；
+    // 与容器名片同款反向缩放 —— 屏幕上大小恒定，不随画布缩放变形
+    const capText = (n.caption !== undefined ? n.caption : fileCaption(n.file ?? '')).trim();
+    if (capText) {
+      const g = new Konva.Group({ y: n.height, listening: false });
+      const cap = new Konva.Label({ listening: false, y: CAPTION_GAP });
+      cap.add(new Konva.Tag({ fill: this.getPlateBg?.() ?? this.palette.canvasBg, cornerRadius: 4, opacity: 0.92, listening: false }));
+      cap.add(new Konva.Text({ text: capText, fontSize: CAPTION_FONT, fontFamily: 'system-ui, sans-serif', fill: this.palette.text, padding: 3, listening: false }));
+      cap.x((n.width * this.scale) / 2);
+      cap.offsetX(cap.width() / 2);
+      g.add(cap);
+      g.scale({ x: 1 / this.scale, y: 1 / this.scale });
+      this.inner.add(g);
+      this.captionGroup = g;
+    }
   }
 
   /** 引擎注入的 file 字段解析器（库内路径 → 可加载 URL）；解析器变化后 file 节点需按新 URL 重建 */
@@ -365,6 +469,28 @@ export class NodeView {
   }
 
   private buildContainer(n: CanvasNode): void {
+    // 圆角：填充与虚线边框共用同一半径（绘制时不再夹取 —— 半径超过短边一半时 Konva
+    // 自己会退化成胶囊形，视觉上等价于「最大可达圆角」）。未设置过 → 用容器默认圆角。
+    const cornerRadius = Math.max(0, n.borderRadius ?? CONTAINER_DEFAULT_RADIUS);
+    // 背景填充：整个容器组会被下移到自己的内容之下（见 core/zorder.paintOrder），
+    // 因此填充不会盖住容器里的节点。透明度用 fillOpacity 而不是节点级 opacity
+    // —— 后者会连容器名片上的文字一起变淡。未设置过 → 用容器默认背景透明度。
+    const fill = n.fill ? (resolveColor(n.fill, this.palette) ?? null) : null;
+    if (fill) {
+      this.inner.add(
+        new Konva.Rect({
+          x: 0,
+          y: 0,
+          width: n.width,
+          height: n.height,
+          fill,
+          cornerRadius,
+          opacity: Math.min(1, Math.max(0, n.fillOpacity ?? CONTAINER_DEFAULT_FILL_OPACITY)),
+          listening: false,
+        }),
+      );
+    }
+    // 虚线边框：颜色跟随主题（不可自定义），压在填充之上
     this.inner.add(
       new Konva.Rect({
         x: 0,
@@ -375,22 +501,21 @@ export class NodeView {
         strokeWidth: 1.5,
         dash: [7, 5],
         fillEnabled: false,
+        cornerRadius,
         opacity: 0.85,
         listening: false,
       }),
     );
-    // 左上角名片：显示容器名称（未命名时给灰色占位），宽度由 Konva 按文本自适应；
+    // 左上角名片：显示容器名称（未命名时给灰色占位）。无边框，底色为画布底色加深；
+    // 名片按 1/视口缩放反向缩放（见 setScale），屏幕尺寸恒定、缩放时大小同步跟随；
     // 名片区域可点选/拖动整个容器，双击可重命名（见 SelectTool / Engine.pick）。
     const name = (n.text ?? '').trim();
     const label = new Konva.Label({ listening: false });
-    label.add(
-      new Konva.Tag({
-        fill: this.palette.canvasBg,
-        stroke: this.palette.containerBorder,
-        strokeWidth: 1,
-        cornerRadius: 4,
-      }),
-    );
+    this.plateTag = new Konva.Tag({
+      fill: this.getPlateBg?.() ?? this.palette.canvasBg,
+      cornerRadius: 4,
+    });
+    label.add(this.plateTag);
     label.add(
       new Konva.Text({
         text: name || '容器',
@@ -400,29 +525,31 @@ export class NodeView {
         fill: name ? this.palette.text : this.palette.textMuted,
       }),
     );
-    const labelW = label.getWidth();
-    const labelH = label.getHeight();
-    const plateY = -CONTAINER_PLATE_GAP - labelH;
-    label.y(plateY);
-    let hitW = labelW;
-    if (n.collapsed) {
-      const tag = new Konva.Label({ x: labelW + 6, listening: false });
-      tag.add(new Konva.Tag({ fill: this.palette.accent, cornerRadius: 4 }));
-      tag.add(new Konva.Text({ text: '已折叠', fontSize: CONTAINER_TAG_FONT, padding: 4, fill: '#ffffff', fontFamily: 'system-ui, sans-serif' }));
-      tag.y(plateY + Math.max(0, (labelH - tag.getHeight()) / 2));
-      this.inner.add(tag);
-      hitW += 6 + tag.getWidth();
-    }
-    this.inner.add(label);
-    this.plateLabel = label;
-    this.plateHit = { x: 0, y: plateY, width: hitW, height: labelH };
-    label.visible(this.scale * CONTAINER_PLATE_FONT >= TEXT_BLOCK_MIN_PX);
+    const plateW = label.getWidth();
+    const plateH = label.getHeight();
+    label.y(-(CONTAINER_PLATE_GAP + plateH));
+    const plate = new Konva.Group({ listening: false });
+    plate.add(label);
+    plate.scale({ x: 1 / this.scale, y: 1 / this.scale });
+    this.inner.add(plate);
+    this.plateGroup = plate;
+    this.plateSize = { width: plateW, height: plateH };
   }
 
-  /** 世界坐标点是否落在容器名片上（含折叠标记） */
+  /** 世界坐标点是否落在容器名片上（名片世界尺寸 = 屏幕尺寸 / 视口缩放，随缩放反向换算） */
   hitsPlate(wx: number, wy: number): boolean {
-    const p = this.plateHit;
-    return !!p && rectContains({ x: this.node.x + p.x, y: this.node.y + p.y, width: p.width, height: p.height }, { x: wx, y: wy });
+    const p = this.plateSize;
+    if (!p) return false;
+    const inv = 1 / this.scale;
+    return rectContains(
+      {
+        x: this.node.x,
+        y: this.node.y - (CONTAINER_PLATE_GAP + p.height) * inv,
+        width: p.width * inv,
+        height: p.height * inv,
+      },
+      { x: wx, y: wy },
+    );
   }
 
   // ---------- 形状 ----------
@@ -472,6 +599,7 @@ export class NodeView {
             points: flatPoints(pointsOf(n)),
             stroke,
             strokeWidth: sw,
+            dash: dashArray(n.strokeStyle, sw),
             lineCap: 'round',
             lineJoin: 'round',
             listening: false,
@@ -486,33 +614,86 @@ export class NodeView {
         this.inner.add(new Konva.Rect({ x: 0, y: 0, width: w, height: h, ...common }));
         break;
     }
+
+    // 线类：关系描述文本画在线段中点（曲线取贝塞尔中点，折线按弧长中点）。
+    // 必须在杆/端点之后入组 —— 垫底色牌盖住穿过文字的线杆，文字才可读
+    if (isLineLike(n) && (n.label ?? '').trim()) {
+      const mid = this.curve
+        ? cubicMidpoint(this.curve.map((v, i) => (i % 2 === 0 ? v - n.x : v - n.y)))
+        : polylineMidpoint(pointsOf(n));
+      const label = new Konva.Label({ listening: false, x: mid.x, y: mid.y });
+      label.add(new Konva.Tag({ fill: this.palette.canvasBg, cornerRadius: 4, opacity: 0.92, listening: false }));
+      label.add(new Konva.Text({ text: n.label!.trim(), fontSize: 13, fontFamily: 'system-ui, sans-serif', fill: this.palette.text, padding: 4, listening: false }));
+      label.offsetX(label.width() / 2);
+      label.offsetY(label.height() / 2);
+      this.inner.add(label);
+    }
   }
 
   private buildArrow(n: CanvasNode, stroke: string, sw: number): void {
     const pts = pointsOf(n);
+    // 端点样式：未显式设置时按形状给默认（arrow = 实心终点，line/polyline = 无）
+    const head = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
+    const tail = n.tailStyle ?? 'none';
+    const bg = this.palette.canvasBg;
+
+    // 双端绑定：三次贝塞尔杆（两端锚点随被连元素移动，曲线由 Engine 渲染时传入）。
+    // 曲线是世界坐标，节点组内须转为节点局部坐标（减去节点原点）。
+    // 带端点的一侧沿曲线回缩一段（de Casteljau 截断，形状不变），圆头线帽藏进端点内部。
+    if (this.curve) {
+      const retract = headLength(sw) * 0.6;
+      let c = this.curve;
+      if (head !== 'none') c = trimCubicEnd(c, retract);
+      if (tail !== 'none') c = trimCubicStart(c, retract);
+      const local = c.map((v, i) => (i % 2 === 0 ? v - n.x : v - n.y));
+      const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] = local;
+      this.inner.add(
+        new Konva.Line({
+          points: local,
+          bezier: true,
+          stroke,
+          strokeWidth: sw,
+          dash: dashArray(n.strokeStyle, sw),
+          lineCap: 'round',
+          listening: false,
+        }),
+      );
+      if (head !== 'none') {
+        const parts = arrowHeadParts({ x: cx2!, y: cy2! }, { x: x2!, y: y2! }, sw, head);
+        if (parts) addHeadShapes(this.inner, parts, stroke, sw, bg);
+      }
+      if (tail !== 'none') {
+        const parts = arrowHeadParts({ x: cx1!, y: cy1! }, { x: x1!, y: y1! }, sw, tail);
+        if (parts) addHeadShapes(this.inner, parts, stroke, sw, bg);
+      }
+      return;
+    }
+
+    const headParts =
+      pts.length >= 2
+        ? arrowHeadParts({ x: pts[pts.length - 2]![0], y: pts[pts.length - 2]![1] }, { x: pts[pts.length - 1]![0], y: pts[pts.length - 1]![1] }, sw, head)
+        : null;
+    const tailParts = pts.length >= 2 ? arrowHeadParts({ x: pts[1]![0], y: pts[1]![1] }, { x: pts[0]![0], y: pts[0]![1] }, sw, tail) : null;
+
+    // 线杆：两端按端点样式回缩（中间折点保持原位），杆先画、端点后画才能盖住回缩端
+    const shaft: number[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const p = i === 0 && tailParts ? tailParts.shaftEnd : i === pts.length - 1 && headParts ? headParts.shaftEnd : { x: pts[i]![0], y: pts[i]![1] };
+      shaft.push(p.x, p.y);
+    }
     this.inner.add(
       new Konva.Line({
-        points: flatPoints(pts),
+        points: shaft,
         stroke,
         strokeWidth: sw,
+        dash: dashArray(n.strokeStyle, sw),
         lineCap: 'round',
         lineJoin: 'round',
         listening: false,
       }),
     );
-    // 箭头头部
-    if (pts.length >= 2) {
-      const [x1, y1] = pts[pts.length - 2];
-      const [x2, y2] = pts[pts.length - 1];
-      this.inner.add(
-        new Konva.Line({
-          closed: true,
-          points: arrowHeadPoints({ x: x1, y: y1 }, { x: x2, y: y2 }, sw),
-          fill: stroke,
-          listening: false,
-        }),
-      );
-    }
+    if (tailParts) addHeadShapes(this.inner, tailParts, stroke, sw, bg);
+    if (headParts) addHeadShapes(this.inner, headParts, stroke, sw, bg);
   }
 }
 
@@ -532,33 +713,92 @@ function flatPoints(pts: number[][]): number[] {
   return out;
 }
 
-/** 箭头头部三角（世界/屏幕坐标通用），供渲染与绘制预览共用 */
-export function arrowHeadPoints(from: { x: number; y: number }, to: { x: number; y: number }, sw: number): number[] {
-  const ang = Math.atan2(to.y - from.y, to.x - from.x);
-  const len = Math.max(10, sw * 3.5);
-  const spread = 0.42;
-  return [
-    to.x,
-    to.y,
-    to.x - len * Math.cos(ang - spread),
-    to.y - len * Math.sin(ang - spread),
-    to.x - len * Math.cos(ang + spread),
-    to.y - len * Math.sin(ang + spread),
-  ];
+/** 追迹左上角 (x0,y0)、尺寸 w×h 的圆角矩形路径；r > 0 时走圆角，否则直角矩形 */
+function traceRoundRect(g: CanvasRenderingContext2D, x0: number, y0: number, w: number, h: number, r: number): void {
+  const x1 = x0 + w;
+  const y1 = y0 + h;
+  g.beginPath();
+  if (r > 0) {
+    g.moveTo(x0 + r, y0);
+    g.arcTo(x1, y0, x1, y1, r);
+    g.arcTo(x1, y1, x0, y1, r);
+    g.arcTo(x0, y1, x0, y0, r);
+    g.arcTo(x0, y0, x1, y0, r);
+    g.closePath();
+  } else {
+    g.rect(x0, y0, w, h);
+  }
 }
 
-/** 判断世界坐标点是否命中节点（用于手动拾取） */
-export function hitTestNode(n: CanvasNode, wx: number, wy: number, palette: Palette): boolean {
-  const tol = 4;
+/**
+ * 文本框背景与实体边框：背景先画、压在边框与文字下方。
+ * 开边框时二者共用「内缩线宽一半」的圆角矩形几何（与 CSS 边框一致，节点边界即视觉边界，
+ * 同时避免位图缓存按包围盒裁掉居中描边的外半圈）；无边框时背景铺满包围盒。
+ * 线宽与圆角都夹取到框内可达的最大值；虚线/点状的 dash 按线宽取比例，
+ * 光栅化（g 已按倍率缩放）与深缩放（Konva 变换）下间距随线宽同步缩放，观感一致。
+ */
+function paintFrame(g: CanvasRenderingContext2D, d: TextDraw): void {
+  const b = d.border;
+  if (!d.fill && !b) return;
+  const w = d.width;
+  const h = d.height;
+  const sw = b ? Math.max(0.5, Math.min(b.width, w, h)) : 0;
+  const inset = sw / 2;
+  const r = Math.min(d.cornerRadius, Math.max(0, Math.min(w, h) / 2 - inset));
+  const x0 = inset;
+  const y0 = inset;
+  const rw = Math.max(0, w - sw);
+  const rh = Math.max(0, h - sw);
+  if (d.fill) {
+    traceRoundRect(g, x0, y0, rw, rh, r);
+    g.fillStyle = d.fill;
+    g.fill();
+  }
+  if (!b) return;
+  g.save();
+  traceRoundRect(g, x0, y0, rw, rh, r);
+  g.strokeStyle = b.color;
+  g.lineWidth = sw;
+  if (b.style === 'dashed') {
+    g.setLineDash([sw * 4, sw * 3]);
+  } else if (b.style === 'dotted') {
+    // 圆头 + 近零短划 = 直径与线宽一致的圆点序列
+    g.lineCap = 'round';
+    g.setLineDash([0.01, sw * 1.9]);
+  }
+  g.stroke();
+  g.restore();
+}
+
+/** 判断世界坐标点是否命中节点（用于手动拾取）。scale = 视口缩放，容差保证不小于约 6 屏幕像素 */
+export function hitTestNode(n: CanvasNode, wx: number, wy: number, palette: Palette, scale = 1, get?: (id: string) => CanvasNode | undefined): boolean {
+  const tol = Math.max(4, 6 / scale);
   if (wx < n.x - tol || wx > n.x + n.width + tol || wy < n.y - tol || wy > n.y + n.height + tol) {
     return false;
   }
   if (!isLineLike(n)) return true;
-  // 线类：精确到线段距离
-  const pts = pointsOf(n).map(([px, py]) => ({ x: n.x + px, y: n.y + py }));
-  const maxDist = Math.max(8, (n.strokeSize ?? 2) * 2);
+  // 双端绑定：命中贝塞尔曲线的采样折线（曲线弓起处也应可点中拖动）
+  if (get && n.fromNode && n.toNode) {
+    const curve = arrowCurve(n, get);
+    if (curve) {
+      const s = sampleCubic(curve.path);
+      const maxDist = Math.max(8, (n.strokeSize ?? 2) * 2, 6 / scale);
+      for (let i = 0; i + 3 < s.length; i += 2) {
+        if (segDist({ x: wx, y: wy }, { x: s[i]!, y: s[i + 1]! }, { x: s[i + 2]!, y: s[i + 3]! }) <= maxDist) return true;
+      }
+      return false;
+    }
+  }
+  // 线类：精确到线段距离（容差随缩放保证屏幕上始终可点中）。
+  // 折点必须过翻转镜像：视觉线是翻转后的线，否则点中的是「另一条对角线」，
+  // 两线只在中心相交 —— 表现为整条线只有中点能拖动。
+  const pts = pointsOf(n).map(([px, py]) => ({
+    x: n.x + (n.flipX ? n.width - px : px),
+    y: n.y + (n.flipY ? n.height - py : py),
+  }));
+  const maxDist = Math.max(8, (n.strokeSize ?? 2) * 2, 6 / scale);
   for (let i = 0; i < pts.length - 1; i++) {
-    if (segDist({ x: wx, y: wy }, pts[i], pts[i + 1]) <= maxDist) return true;
+    if (segDist({ x: wx, y: wy }, pts[i]!, pts[i + 1]!) <= maxDist) return true;
   }
   return false;
 }

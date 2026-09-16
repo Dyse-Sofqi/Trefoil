@@ -22,7 +22,7 @@ function fmtArg(arg: unknown): string {
 
 export class ErrorLogger {
   private buf: string[] = [];
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushTimer: number | null = null;
   private recording = false;
   private readonly origError: (...args: unknown[]) => void;
 
@@ -70,13 +70,13 @@ export class ErrorLogger {
     const ts = new Date().toISOString().slice(11, 23);
     this.buf.push(`[${ts}][${source}] ${message}`);
     if (stack) this.buf.push(stack);
-    if (this.flushTimer) clearTimeout(this.flushTimer);
-    this.flushTimer = setTimeout(() => void this.flush(), 300);
+    if (this.flushTimer) window.clearTimeout(this.flushTimer);
+    this.flushTimer = window.setTimeout(() => void this.flush(), 300);
   }
 
   private async flush(): Promise<void> {
     if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
+      window.clearTimeout(this.flushTimer);
       this.flushTimer = null;
     }
     if (!this.buf.length || this.recording) return;

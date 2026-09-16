@@ -136,6 +136,27 @@ export function bezierPath(a: Vec, aSide: string, b: Vec, bSide: string): { path
   return { path: [a, c1, c2, b], endTangent: { x: b.x - c2.x, y: b.y - c2.y } };
 }
 
+/**
+ * 导图分支线（三次贝塞尔，[起点, 控制点1, 控制点2, 终点]）。
+ * 经典导图形态（XMind/markmap）：
+ * - 子节点在父节点右侧时从父节点右缘中点出发、水平切线进入子节点左缘中点；在左侧则镜像（左出右入）；
+ * - 两端切线始终水平，张力恒为两节点边缘水平间距的一半 —— 控制点收在两节点之间的中线上，
+ *   子节点无论被拖到多高 / 多低，曲线都是对称平滑的 S 形并随位置连续变化。
+ * 注意：渲染端（EdgeView）必须以 Konva Line 的 bezier 模式绘制 —— 默认折线模式会把控制点
+ * 当折点连成 Z 字折线。
+ */
+export function mindmapEdgeCurve(from: Rect, to: Rect): { path: [Vec, Vec, Vec, Vec] } {
+  const fc = rectCenter(from);
+  const tc = rectCenter(to);
+  const dir = tc.x >= fc.x ? 1 : -1;
+  const p0 = { x: dir > 0 ? from.x + from.width : from.x, y: fc.y };
+  const p1 = { x: dir > 0 ? to.x : to.x + to.width, y: tc.y };
+  const k = Math.abs(p1.x - p0.x) / 2;
+  const c1 = { x: p0.x + dir * k, y: p0.y };
+  const c2 = { x: p1.x - dir * k, y: p1.y };
+  return { path: [p0, c1, c2, p1] };
+}
+
 function sideNormal(side: string): Vec {
   switch (side) {
     case 'top':
@@ -155,4 +176,37 @@ export const round2 = (v: number) => Math.round(v * 100) / 100;
 
 export function isContainer(n: CanvasNode | undefined): n is CanvasNode {
   return !!n && isContainerNode(n);
+}
+
+/**
+ * 形状工具的拖拽矩形（PS 规范辅助键）：
+ * - 默认：起点/终点对角矩形；
+ * - Shift：约束正形（正方形包围盒），以起笔角为锚点朝拖拽方向扩展；
+ * - Alt：中心展开 —— 起点是图形中心，终点为半径对角；
+ * - Shift+Alt：中心展开且约束正形。
+ */
+export function shapeRectFromDrag(start: Vec, cur: Vec, shift: boolean, alt: boolean): Rect {
+  const dx = cur.x - start.x;
+  const dy = cur.y - start.y;
+  const w = Math.abs(dx);
+  const h = Math.abs(dy);
+
+  if (alt) {
+    // 中心 = 起笔点，cur 决定半径
+    if (shift) {
+      const s = 2 * Math.max(w, h);
+      return { x: start.x - s / 2, y: start.y - s / 2, width: Math.max(1, s), height: Math.max(1, s) };
+    }
+    return { x: start.x - w, y: start.y - h, width: Math.max(1, 2 * w), height: Math.max(1, 2 * h) };
+  }
+
+  if (shift) {
+    const s = Math.max(w, h);
+    // 锚点 = 起笔角：朝拖拽方向扩展成正形
+    const x = dx >= 0 ? start.x : start.x - s;
+    const y = dy >= 0 ? start.y : start.y - s;
+    return { x, y, width: Math.max(1, s), height: Math.max(1, s) };
+  }
+
+  return normalizeRect({ x: Math.min(start.x, cur.x), y: Math.min(start.y, cur.y), width: w, height: h });
 }

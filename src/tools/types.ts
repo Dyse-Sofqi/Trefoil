@@ -50,11 +50,11 @@ export interface ToolCtx {
   canDropImages?(e: DragEvent): boolean;
   /** 拖放图片到画布（宿主解析拖放来源 → 库内图片直接引用 / 新图片落盘 + 建节点），返回新建数量 */
   dropImages(e: DragEvent, at: { x: number; y: number }): Promise<number>;
-  /** 最近一次点击命中的节点 id（导图 Tab/Enter 语义依赖） */
-  lastClickedNodeId?: string;
   setTool(id: string): void;
   activeToolId(): string;
   beginTextEdit(nodeId: string): void;
+  /** 双击线段：在曲线/折线中点内联编辑关系描述文本（edge = 连线 label，node = 线类形状 label） */
+  beginLabelEdit(kind: 'edge' | 'node', id: string): void;
   /** 重命名容器：选中它并聚焦属性面板的名称输入框（双击名片触发） */
   renameContainer?(containerId: string): void;
   isEditing(): boolean;
@@ -62,6 +62,10 @@ export interface ToolCtx {
   setCursor(cursor: string): void;
   toast(msg: string): void;
   onViewportChanged?(): void;
+  /** 导图：给选中节点添加子节点（文本框）并进入编辑；返回是否已处理（未选中导图节点时 false） */
+  mapAddChild(nodeId: string): boolean;
+  /** 导图：给选中的导图子节点添加同级节点（文本框）并进入编辑；返回是否已处理 */
+  mapAddSibling(nodeId: string): boolean;
 }
 
 export abstract class Tool {

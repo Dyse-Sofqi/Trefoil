@@ -12,6 +12,7 @@ import {
 } from '../src/app/minimap';
 import type { Palette } from '../src/engine/palette';
 import type { CanvasNode } from '../src/core/types';
+import { CONTAINER_DEFAULT_FILL_OPACITY } from '../src/core/defaults';
 
 const palette: Palette = {
   canvasBg: '#ffffff',
@@ -116,6 +117,26 @@ describe('miniNodePaint', () => {
   it('容器：虚线描边', () => {
     const p = miniNodePaint(node({ type: 'trefoil/container', width: 200, height: 120 }), palette);
     expect(p).toMatchObject({ color: palette.containerBorder, outline: true, dashed: true });
+  });
+
+  it('容器：设了背景色则按背景色实心块，透明度跟随 fillOpacity（低透明度有可见度下限）', () => {
+    const p = miniNodePaint(node({ type: 'trefoil/container', width: 200, height: 120, fill: '#ff0000', fillOpacity: 1 }), palette);
+    expect(p).toMatchObject({ color: '#ff0000', outline: false, dashed: false });
+    expect(p.alpha).toBeCloseTo(0.9, 6);
+    // 低透明度（含默认的 10%）在缩略图里仍要看得见
+    const faint = miniNodePaint(node({ type: 'trefoil/container', width: 200, height: 120, fill: '#ff0000', fillOpacity: 0.25 }), palette);
+    expect(faint.alpha).toBeCloseTo(0.35, 6);
+  });
+
+  it('容器：没设过背景透明度时按容器默认值算（不是 1）', () => {
+    const p = miniNodePaint(node({ type: 'trefoil/container', width: 200, height: 120, fill: '#ff0000' }), palette);
+    expect(CONTAINER_DEFAULT_FILL_OPACITY).toBeLessThan(1);
+    expect(p.alpha).toBeCloseTo(Math.max(0.35, 0.9 * CONTAINER_DEFAULT_FILL_OPACITY), 6);
+  });
+
+  it('容器：背景色用预设色时按调色板解析', () => {
+    const p = miniNodePaint(node({ type: 'trefoil/container', width: 200, height: 120, fill: '2' }), palette);
+    expect(p).toMatchObject({ color: palette.presets[1], outline: false });
   });
 
   it('文本：半透明实心块', () => {

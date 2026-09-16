@@ -1,16 +1,16 @@
 /**
  * ToolManager：注册/切换工具，统一分发指针/滚轮/键盘事件。
- * - 右键/中键拖拽 = 平移画布；右键单击（未拖动）= 上下文菜单。
+ * - 右键/中键拖拽 = 平移画布；右键单击（未拖动）= 激活绘图工具时回到选择工具，选择工具下为上下文菜单。
  * - 滚轮 = 以鼠标位置为中心缩放。
- * - 全局快捷键：撤销/重做、删除、复制粘贴、工具切换、镭射清除等。
+ * - 画布内快捷键：撤销/重做、删除、复制粘贴、工具切换、镭射清除等。
+ *   走 window 上的 keydown 监听（而非 Obsidian 的 addCommand 默认热键）：画布快捷键绝不能
+ *   占用 Mod+Z 这类全局热键，否则会吞掉编辑器的原生撤销（原因见 main.ts 里 undo 命令的注释）。
  */
 import type Konva from 'konva';
 import { TOOL_HOTKEYS, type ContextMenuInfo, type PointerEvt, type Tool, type ToolCtx } from './types';
 import type { Engine } from '../engine/Engine';
 import { clamp } from '../core/geometry';
-import { addChildNode, addSiblingNode, toggleCollapse } from '../core/mindmap';
 import { isOwnClipboardText, readNodesFromSystemClipboard } from '../core/systemClipboard';
-import { textStyleDefaults } from '../core/defaults';
 import { extensionForFile } from '../core/attachment';
 import { isImageFileDrag } from '../core/dragDrop';
 
@@ -28,15 +28,15 @@ export class ToolManager {
   private activeTool: Tool | null = null;
   private pan: PanSession | null = null;
   private dragging = false;
+  /** 双击检测：上一次左键按下（时间 / 屏幕坐标）；原生 dblclick 在部分环境不可靠，自行合成 */
+  private lastDown: { t: number; sx: number; sy: number } | null = null;
+  /** 本次按下对已由指针序列合成过双击：随后到达的原生 dblclick 需去重跳过 */
+  private pendingNativeDbl = false;
   private container: HTMLDivElement;
   private rectCache: DOMRect | null = null;
   private disposers: (() => void)[] = [];
   /** 空格按住 = 临时平移模式（左键拖拽平移画布） */
   private spacePan = false;
-  /** 按住空格期间按过左键（点击或拖拽）→ 松开空格时不触发折叠 */
-  private spacePanUsed = false;
-  /** 按下空格时是否有可折叠的容器选中项（松开且未拖拽时执行） */
-  private spaceCollapsePending = false;
   /** 最近一次指针位置（世界坐标）及是否在画布内：粘贴落点用 */
   private lastPointerWorld: { x: number; y: number } | null = null;
   private pointerInCanvas = false;
@@ -94,9 +94,9 @@ export class ToolManager {
         return;
       }
       if (e.button !== 0) return;
-      // 空格 + 左键拖拽 = 平移画布（点击本身也视为占用，松开空格不触发折叠）
+      this.pendingNativeDbl = false;
+      // 空格 + 左键拖拽 = 平移画布
       if (this.spacePan) {
-        this.spacePanUsed = true;
         this.pan = {
           button: 0,
           sx: e.clientX - this.rectCache.left,
@@ -109,6 +109,27 @@ export class ToolManager {
         e.preventDefault();
         return;
       }
+      // 双击合成：两次左键按下间隔 <500ms、位移 <6px 即视为双击（本次按下不再分发 onPointerDown）。
+      // 窗口必须覆盖操作系统允许的双击速度（Windows 默认 500ms，用户可调更慢）——
+      // 曾用 400ms 导致正常偏慢的双击全部丢失、无法进入文本编辑；
+      // 超出窗口的慢速双击由下方原生 dblclick 兜底（跟随操作系统设置），两路经 pendingNativeDbl 去重。
+      const now = performance.now();
+      const sx = e.clientX - this.rectCache.left;
+      const sy = e.clientY - this.rectCache.top;
+      if (this.lastDown && now - this.lastDown.t < 500 && Math.hypot(sx - this.lastDown.sx, sy - this.lastDown.sy) < 6) {
+        this.lastDown = null;
+        this.pendingNativeDbl = true;
+        // 必须取消本次按下的默认动作：合成双击在这里就进入了编辑态（「双击空白新建文本」会在微任务里
+        // 把焦点交给覆盖层的 textarea），而 pointerdown 之后浏览器还会执行 mousedown 的默认动作
+        // （焦点移到 body / 最近的 focusable 祖先）——刚聚焦的 textarea 立刻被 blur，覆盖层 onblur
+        // 提交空文本，新建的节点当场被删掉，表现为「双击毫无反应」。
+        // 取消后 mousedown/mouseup 不再派发，但 click / dblclick 照常触发（下方去重逻辑不受影响）。
+        e.preventDefault();
+        this.activeTool?.onDoubleClick?.(this.makeEvt(e));
+        return;
+      }
+      this.lastDown = { t: now, sx, sy };
+
       const evt = this.makeEvt(e);
       this.activeTool?.onPointerDown?.(evt);
     };
@@ -149,6 +170,12 @@ export class ToolManager {
         this.pan = null;
         this.ctx.setCursor(this.spacePan ? 'grab' : cursorForTool(this.activeId()));
         if (!wasPan.moved && wasPan.button === 2) {
+          // 激活绘图工具时右键单击 = 回到默认选择工具（消费本次点击，不开菜单）；
+          // 再按一次右键（此时已是选择工具）才是上下文菜单
+          if (this.activeTool?.id !== 'select') {
+            this.ctx.setTool('select');
+            return;
+          }
           const evt = this.makeEvt(e);
           this.ctx.openContextMenu({
             sx: evt.sx,
@@ -163,6 +190,17 @@ export class ToolManager {
       const evt = this.makeEvt(e);
       this.activeTool?.onPointerUp?.(evt);
     };
+    // 原生 dblclick 兜底：操作系统判定为双击但超出合成窗口（>500ms）的慢速双击由这里接住；
+    // 快速双击两条路径都会到，用 pendingNativeDbl 去重（合成已在 down 时触发过）
+    const dbl = (e: MouseEvent) => {
+      if (!this.rectCache) this.rectCache = c.getBoundingClientRect();
+      if (e.button !== 0) return;
+      if (this.pendingNativeDbl) {
+        this.pendingNativeDbl = false;
+        return;
+      }
+      this.activeTool?.onDoubleClick?.(this.makeEvt(e as unknown as PointerEvent));
+    };
     const cancel = (e: PointerEvent) => {
       // 数位板笔/触摸被浏览器手势接管时触发（此时不会再有 pointerup）：视作强制抬笔，避免工具状态卡死
       this.dragging = false;
@@ -171,12 +209,6 @@ export class ToolManager {
         this.ctx.setCursor(this.spacePan ? 'grab' : cursorForTool(this.activeId()));
       }
       this.activeTool?.onPointerUp?.(this.makeEvt(e));
-    };
-    const dbl = (e: MouseEvent) => {
-      if (!this.rectCache) this.rectCache = c.getBoundingClientRect();
-      if (e.button !== 0) return;
-      const evt = this.makeEvt(e as unknown as PointerEvent);
-      this.activeTool?.onDoubleClick?.(evt);
     };
     const paste = (e: ClipboardEvent) => {
       const el = e.target as HTMLElement | null;
@@ -316,6 +348,10 @@ export class ToolManager {
   // ---------- 键盘 ----------
 
   private onKeyDown(e: KeyboardEvent): void {
+    // 画布不在可见的前台时不响应键盘：切到后台标签页并不会卸载视图，
+    // 否则在别的面板里按 Delete / Ctrl+A 会误改后台那张白板。
+    if (!this.container.isConnected || this.container.getClientRects().length === 0) return;
+
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable)) return;
     if (this.ctx.isEditing()) return;
@@ -376,21 +412,10 @@ export class ToolManager {
       doc.clearSelection();
       return;
     }
-    if (key === 'Tab') {
-      e.preventDefault();
-      this.addChildInContainer();
-      return;
-    }
-    if (key === 'Enter') {
-      this.addSiblingInContainer();
-      return;
-    }
     if (key === ' ') {
-      // 按住空格 = 临时平移模式；点按（未动鼠标）仍折叠/展开容器，折叠延迟到松开时执行
+      // 按住空格 = 临时平移模式
       if (!this.spacePan) {
         this.spacePan = true;
-        this.spacePanUsed = false;
-        this.spaceCollapsePending = this.hasCollapseTarget();
         this.ctx.setCursor('grab');
       }
       e.preventDefault();
@@ -426,85 +451,21 @@ export class ToolManager {
     }
   }
 
-  /** 松开空格：退出临时平移模式；点按（期间未动左键、未进入编辑）执行容器折叠/展开 */
+  /** 松开空格：退出临时平移模式 */
   private onKeyUp(e: KeyboardEvent): void {
     if (e.key !== ' ' || !this.spacePan) return;
     this.spacePan = false;
     if (!this.pan) this.ctx.setCursor(cursorForTool(this.activeId()));
-    const collapse = this.spaceCollapsePending && !this.spacePanUsed && !this.ctx.isEditing();
-    this.spaceCollapsePending = false;
-    if (collapse) this.toggleCollapseInContainer();
-  }
-
-  private hasCollapseTarget(): boolean {
-    const { doc } = this.ctx;
-    return doc.selectedNodes().some((n) => n.containerId || n.type === 'trefoil/container');
   }
 
   private deleteSelection(): void {
     const { doc } = this.ctx;
     if (doc.selection.size === 0) return;
-    const ids = new Set<string>();
-    for (const id of doc.selection) {
-      const n = doc.getNode(id);
-      if (!n) continue;
-      ids.add(id);
-      if (n.containerId || n.type === 'trefoil/container') {
-        // 容器内部节点：级联删除子树
-        const collect = (nid: string) => {
-          for (const c of doc.nodes.filter((x) => x.treeParent === nid)) {
-            ids.add(c.id);
-            collect(c.id);
-          }
-        };
-        collect(id);
-      }
-    }
-    doc.removeNodes([...ids]);
-  }
-
-  private addChildInContainer(): void {
-    const { doc, settings } = this.ctx;
-    // 优先：最后点击的容器内节点 → 其子节点；其次唯一选中的内节点；否则容器根
-    const last = this.ctx.lastClickedNodeId ? doc.getNode(this.ctx.lastClickedNodeId) : null;
-    const selNodes = doc.selectedNodes();
-    const picked =
-      (last && last.containerId && last.type !== 'trefoil/container' ? last : null) ??
-      (selNodes.length === 1 && selNodes[0].containerId && selNodes[0].type !== 'trefoil/container' ? selNodes[0] : null);
-    const containerSel = selNodes.find((n) => n.type === 'trefoil/container');
-    if (!picked && !containerSel) return;
-    const containerId = picked ? picked.containerId! : containerSel!.id;
-    const treeParent = picked ? picked.id : null;
-    const newId = addChildNode(doc, containerId, treeParent, textStyleDefaults(settings.text));
-    if (newId) {
-      this.ctx.lastClickedNodeId = newId;
-      doc.setSelection([newId]);
-      this.ctx.beginTextEdit(newId);
-    }
-  }
-
-  private addSiblingInContainer(): void {
-    const { doc, settings } = this.ctx;
-    const last = this.ctx.lastClickedNodeId ? doc.getNode(this.ctx.lastClickedNodeId) : null;
-    const selNodes = doc.selectedNodes();
-    const sel =
-      (last && last.containerId && last.type !== 'trefoil/container' ? last : null) ??
-      selNodes.find((n) => n.containerId && n.type !== 'trefoil/container');
-    if (!sel) return;
-    const newId = addSiblingNode(doc, sel.containerId!, sel.id, textStyleDefaults(settings.text));
-    if (newId) {
-      this.ctx.lastClickedNodeId = newId;
-      doc.setSelection([newId]);
-      this.ctx.beginTextEdit(newId);
-    }
-  }
-
-  private toggleCollapseInContainer(): boolean {
-    const { doc } = this.ctx;
-    const sel = doc.selectedNodes().find((n) => n.containerId || n.type === 'trefoil/container');
-    if (!sel) return false;
-    toggleCollapse(doc, sel.id);
-    return true;
+    // 选中集合里可能含连线 id：节点/连线分别删除
+    const nodeIds = [...doc.selection].filter((id) => doc.getNode(id));
+    const edgeIds = [...doc.selection].filter((id) => doc.getEdge(id));
+    if (nodeIds.length) doc.removeNodes(nodeIds);
+    if (edgeIds.length) doc.removeEdges(edgeIds);
   }
 
   destroy(): void {

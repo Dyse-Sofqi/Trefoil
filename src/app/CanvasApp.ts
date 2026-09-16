@@ -4,14 +4,14 @@
  */
 import { Document } from '../core/Document';
 import { History } from '../core/History';
-import { mergeSettings, textStyleDefaults, type TrefoilSettings, type ViewMode } from '../core/defaults';
+import { effectiveBackground, mergeSettings, remapThemeDefaultColors, textBorderDefaults, textStyleDefaults, type BackgroundSettings, type TrefoilSettings, type ViewMode } from '../core/defaults';
 import { parseDoc, serializeDoc } from '../data/jsonCanvas';
 import { Engine, type PickResult } from '../engine/Engine';
 import type { Palette } from '../engine/palette';
-import { readPalette } from '../engine/palette';
-import { autoTextHeight, layoutText } from '../engine/textMeasure';
-import { TEXT_PADDING } from '../engine/NodeView';
+import { resolveThemedPalette } from '../engine/palette';
+import { autoTextHeight, autoTextWidth } from '../engine/textMeasure';
 import { ToolManager, cursorForTool } from '../tools/ToolManager';
+import { applyCursor } from './cursor';
 import type { ToolCtx } from '../tools/types';
 import { SelectTool } from '../tools/SelectTool';
 import { ShapeTool, PolylineTool, TextTool } from '../tools/ShapeTool';
@@ -19,9 +19,17 @@ import { LaserTool, EraserTool } from '../tools/AnnotationTools';
 import { PanTool } from '../tools/PanTool';
 import { Clipboard, composeIntoContainer, decomposeContainer } from '../core/clipboard';
 import { writeNodesToSystemClipboard } from '../core/systemClipboard';
-import { addChildNode, buildLayoutInput, fitContainerToChildren, toggleCollapse } from '../core/mindmap';
-import { layoutAsync } from '../workers/layoutClient';
+import { computeArrange, type ArrangeParams } from '../core/arrange';
+import {
+  addMapChild,
+  addMapSibling,
+  downgradeMapRoot as clearMapRoot,
+  upgradeToMapRoot,
+  type MapNodeStyle,
+} from '../core/mindmap';
 import { exportPng, exportSvg } from '../exporter';
+import { bezierPath, inferSides, mindmapEdgeCurve, nodeRect, sideAnchor, type Rect } from '../core/geometry';
+import { arrowCurve, cubicMidpoint, polylineMidpoint } from '../core/arrowLink';
 import type { HostAdapter, DroppedImages } from './host';
 import { buildContextMenu } from './contextMenu';
 import { bumpRev, closeContextMenu, settings as uiSettings, ui, updateStatus } from './ui.svelte';
@@ -29,9 +37,7 @@ import type { CanvasEdge, CanvasNode } from '../core/types';
 import { extensionForFile, pastedImageName } from '../core/attachment';
 import { isImageFileDrag } from '../core/dragDrop';
 
-/** 粘贴文本元素的行宽范围与行间距（世界 px） */
-const PASTE_MIN_WIDTH = 60;
-const PASTE_MAX_WIDTH = 480;
+/** 粘贴文本元素的行间距（世界 px） */
 const PASTE_GAP = 8;
 
 export class CanvasApp {
@@ -43,10 +49,17 @@ export class CanvasApp {
   settings: TrefoilSettings;
   adapter: HostAdapter;
   palette!: Palette;
+  /** 主题适配后的画布背景设置（Engine 构造与主题切换使用） */
+  background!: BackgroundSettings;
+  /** 画布宿主元素：既是 Konva Stage 的容器，也是读取宿主 CSS 变量（调色板）的根 */
+  private hostEl: HTMLElement | null = null;
+  /** 上一次应用的主题形态（dark/light）：检测翻转以同步元素默认色 */
+  private appliedKind: 'dark' | 'light' | null = null;
 
-  private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  private persistTimer: ReturnType<typeof setTimeout> | null = null;
-  private styleCommitTimer: ReturnType<typeof setTimeout> | null = null;
+  // 计时器句柄：统一走 window.setTimeout（Obsidian 弹窗窗口兼容），返回 DOM 的 number 而非 NodeJS.Timeout
+  private saveTimer: number | null = null;
+  private persistTimer: number | null = null;
+  private styleCommitTimer: number | null = null;
   private lastSaved = '';
   private disposers: (() => void)[] = [];
   private lastTool = 'select';
@@ -67,7 +80,9 @@ export class CanvasApp {
   }
 
   private async init(container: HTMLElement): Promise<void> {
-    this.palette = this.adapter.palette?.() ?? readPalette();
+    this.hostEl = container;
+    this.resolveThemePalette();
+    this.appliedKind = /theme-dark/.test(document.body.className) ? 'dark' : this.settings.theme === 'dark' ? 'dark' : 'light';
     const json = await this.adapter.load();
     const parsed = json ? parseDoc(json) : { nodes: [], edges: [] };
     this.doc.nodes = parsed.nodes;
@@ -82,10 +97,11 @@ export class CanvasApp {
     // 晚一步注入会让图片先按原始相对路径加载失败、被判定为「缺失」。
     // 宿主未实现 resolveImageUrl 时传 null，NodeView 按原始值处理（开发测试台用 data/https URL）。
     const resolveImageUrl = this.adapter.resolveImageUrl?.bind(this.adapter) ?? null;
-    this.engine = new Engine(host, this.doc, this.palette, this.settings.background, this.settings.laser, resolveImageUrl);
+    this.engine = new Engine(host, this.doc, this.palette, this.background, this.settings.laser, resolveImageUrl);
     // 视口变化 → 状态栏缩放 + 编辑覆盖层跟随
     this.engine.onViewportChange = () => {
       ui.vpRev++;
+      ui.labelEdit = null; // 关系描述编辑框挂在屏幕坐标上，视口变化即关闭
       updateStatus({ zoom: this.engine.vp.scale });
     };
     // 初始视口：内容居中
@@ -105,6 +121,7 @@ export class CanvasApp {
       setTool: (id) => this.setTool(id),
       activeToolId: () => this.tools.activeId(),
       beginTextEdit: (id) => this.beginPathTextEdit(id),
+      beginLabelEdit: (kind, id) => this.beginLabelEdit(kind, id),
       renameContainer: (id) => this.renameContainer(id),
       copySelection: (cut) => this.copySelection(cut),
       pasteText: (text, at) => this.pasteTextAsNodes(text, at),
@@ -116,9 +133,11 @@ export class CanvasApp {
       openContextMenu: (info) => {
         ui.contextMenu = { sx: info.sx, sy: info.sy, items: buildContextMenu(this, info) };
       },
-      setCursor: (c) => (this.engine.stage.container().style.cursor = c),
+      setCursor: (c) => applyCursor(this.engine.stage.container(), c),
       toast: (msg) => this.adapter.toast?.(msg),
       onViewportChanged: () => updateStatus({ zoom: this.engine.vp.scale }),
+      mapAddChild: (id) => this.addMapChildTo(id),
+      mapAddSibling: (id) => this.addMapSiblingOf(id),
     };
     this.tools = new ToolManager(this.engine.stage, ctx);
     this.tools.registerAll([
@@ -148,6 +167,9 @@ export class CanvasApp {
     this.disposers.push(this.doc.events.on('selection', () => {
       bumpRev();
       updateStatus({ selectionCount: this.doc.selection.size });
+      // 选择变化 → 立即刷新覆盖层（选中框 / 线类端点手柄）；
+      // 否则程序化选中（右键菜单、面板按钮等）后手柄要到下一次指针抬起才出现
+      this.engine.applyOverlay();
     }));
 
     // 主题变化 → 重新着色
@@ -220,8 +242,10 @@ export class CanvasApp {
       this.doc.removeNodes([nodeId]);
       return;
     }
-    const height = autoTextHeight(text, n.width, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
-    this.doc.updateNode(nodeId, { text, height }, '编辑文本');
+    // 宽高都贴合内容：宽度取最宽行（超上限才折行），高度按该宽度重排
+    const width = autoTextWidth(text, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
+    const height = autoTextHeight(text, width, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
+    this.doc.updateNode(nodeId, { text, width, height }, '编辑文本');
     // 文本未变化时 mutate 不发 changed 事件，仍需结束编辑态的隐藏并重渲染
     this.engine.render();
   }
@@ -241,6 +265,7 @@ export class CanvasApp {
       height: 36,
       text: '',
       ...textStyleDefaults(this.settings.text),
+      ...textBorderDefaults(this.settings.shape),
     });
     this.doc.addNodes([node]);
     this.beginPathTextEdit(node.id);
@@ -261,7 +286,7 @@ export class CanvasApp {
 
   /**
    * 粘贴系统剪贴板文本：按行拆成独立文本元素，整体居中堆叠在视口中央（一次撤销）。
-   * 每行按自然宽度成框（超宽换行），多行左对齐堆叠，便于连续粘贴成的清单。
+   * 每行宽高贴合内容（超上限折行），多行左对齐堆叠，便于连续粘贴成的清单。
    */
   pasteTextAsNodes(text: string, at?: { x: number; y: number }): number {
     const lines = text
@@ -271,8 +296,7 @@ export class CanvasApp {
     if (!lines.length) return 0;
     const style = textStyleDefaults(this.settings.text);
     const boxes = lines.map((line) => {
-      const natural = layoutText(line, 100000, style.fontSize, style.fontFamily, style.fontWeight).lines[0]?.width ?? 0;
-      const width = Math.max(PASTE_MIN_WIDTH, Math.min(PASTE_MAX_WIDTH, Math.ceil(natural + TEXT_PADDING * 2)));
+      const width = autoTextWidth(line, style.fontSize, style.fontFamily, style.fontWeight);
       const height = autoTextHeight(line, width, style.fontSize, style.fontFamily, style.fontWeight);
       return { line, width, height };
     });
@@ -283,7 +307,16 @@ export class CanvasApp {
     const left = Math.round(at ? at.x : center.x - blockW / 2);
     let y = Math.round(at ? at.y : center.y - blockH / 2);
     const nodes = boxes.map((b) => {
-      const node = Document.newNode({ type: 'text', x: left, y, width: b.width, height: b.height, text: b.line, ...style });
+      const node = Document.newNode({
+        type: 'text',
+        x: left,
+        y,
+        width: b.width,
+        height: b.height,
+        text: b.line,
+        ...style,
+        ...textBorderDefaults(this.settings.shape),
+      });
       y += b.height + PASTE_GAP;
       return node;
     });
@@ -434,8 +467,8 @@ export class CanvasApp {
   liveSelectionProps(patch: Partial<CanvasNode>, label = '修改样式'): void {
     if (!this.doc.selection.size) return;
     this.doc.liveStyle(patch, label);
-    if (this.styleCommitTimer) clearTimeout(this.styleCommitTimer);
-    this.styleCommitTimer = setTimeout(() => {
+    if (this.styleCommitTimer) window.clearTimeout(this.styleCommitTimer);
+    this.styleCommitTimer = window.setTimeout(() => {
       this.styleCommitTimer = null;
       this.doc.commitStyle();
     }, 300);
@@ -445,8 +478,8 @@ export class CanvasApp {
   liveSelectionPatches(patches: Map<string, Partial<CanvasNode>>, label = '修改样式'): void {
     if (!patches.size) return;
     this.doc.liveStyleMulti(patches, label);
-    if (this.styleCommitTimer) clearTimeout(this.styleCommitTimer);
-    this.styleCommitTimer = setTimeout(() => {
+    if (this.styleCommitTimer) window.clearTimeout(this.styleCommitTimer);
+    this.styleCommitTimer = window.setTimeout(() => {
       this.styleCommitTimer = null;
       this.doc.commitStyle();
     }, 300);
@@ -455,71 +488,219 @@ export class CanvasApp {
   /** 立即结束连续调整（滑块松手时不用等计时） */
   commitSelectionStyle(): void {
     if (this.styleCommitTimer) {
-      clearTimeout(this.styleCommitTimer);
+      window.clearTimeout(this.styleCommitTimer);
       this.styleCommitTimer = null;
     }
     this.doc.commitStyle();
   }
 
-  deleteSelection(): void {
-    const ids = new Set<string>();
-    for (const id of this.doc.selection) {
-      const n = this.doc.getNode(id);
-      if (!n) continue;
-      ids.add(id);
-      if (n.containerId || n.type === 'trefoil/container') {
-        const collect = (nid: string) => {
-          for (const c of this.doc.nodes.filter((x) => x.treeParent === nid)) {
-            ids.add(c.id);
-            collect(c.id);
-          }
-        };
-        collect(id);
-      }
+  // ---------- 多选排列 ----------
+
+  /** 进行中的排列会话：起点快照（撤销 / 重作用），停顿后经 commitPositions 合并为一条撤销记录 */
+  private arrangeStarts = new Map<string, { x: number; y: number }>();
+  private arrangeTimer: number | null = null;
+  /** 环形排列会话的圆心：会话内固定（首次调用时按当前几何计算），避免滑块重算时圆心漂移 */
+  private arrangeRingCenter: { x: number; y: number } | null = null;
+
+  /**
+   * 多选排列（横向 / 纵向 / 矩阵 / 环形）：实时生效，停顿 300ms 后合并为一条撤销记录。
+   * 连续调用（拖动间距滑块）基于当前几何重算 —— 排列保持锚点（包围盒左上角或几何中心）不动、
+   * 尺寸不变、顺序稳定，对自身幂等，无需保存会话前的基准几何。
+   * 环形例外：圆心在会话内固定，否则元素上环后包围盒中心变化会让圆心跟着漂移。
+   */
+  arrangeSelection(p: ArrangeParams): void {
+    const nodes = this.doc.selectedNodes();
+    if (nodes.length < 2) return;
+    if (!this.arrangeStarts.size) {
+      for (const n of nodes) this.arrangeStarts.set(n.id, { x: n.x, y: n.y });
     }
-    this.doc.removeNodes([...ids]);
-  }
-
-  // ---------- 思维导图容器 ----------
-
-  addChildTo(containerOrNodeId: string): void {
-    const n = this.doc.getNode(containerOrNodeId);
-    if (!n) return;
-    const containerId = n.type === 'trefoil/container' ? n.id : (n.containerId ?? null);
-    const treeParent = n.type === 'trefoil/container' ? null : n.id;
-    if (!containerId) return;
-    const id = addChildNode(this.doc, containerId, treeParent, textStyleDefaults(this.settings.text));
-    if (id) {
-      this.doc.setSelection([id]);
-      this.beginPathTextEdit(id);
-    }
-  }
-
-  async layoutContainer(containerId: string, direction: 'horizontal' | 'vertical'): Promise<void> {
-    const container = this.doc.getNode(containerId);
-    if (!container) return;
-    // 以容器的第一个树根（或第一个子节点）为根整理整棵树
-    const children = this.doc.containerChildren(containerId);
-    if (!children.length) return;
-    const roots = children.filter((c) => !c.treeParent);
-    const rootId = (roots[0] ?? children[0]).id;
-    const input = buildLayoutInput(this.doc, rootId, direction, container.x + 60, container.y + 60);
-    const positions = await layoutAsync(input);
-    // 布局结果为相对 root 的绝对坐标（rootX/rootY 已含容器原点）
-    this.doc.mutate('自动布局', () => {
-      for (const [id, p] of Object.entries(positions)) {
-        const n = this.doc.getNode(id);
-        if (n) {
-          n.x = p.x;
-          n.y = p.y;
+    // 容器与其子节点同时被选中时，子节点跟随容器平移，不参与独立排位（保持容器内部相对布局）
+    const containers = new Set(nodes.filter((n) => n.type === 'trefoil/container').map((n) => n.id));
+    const independent = nodes.filter((n) => !(n.containerId && containers.has(n.containerId)));
+    let params = p;
+    if (p.mode === 'ring' && p.ring) {
+      if (!this.arrangeRingCenter) {
+        let minX = Infinity;
+        let minY = Infinity;
+        let maxX = -Infinity;
+        let maxY = -Infinity;
+        for (const n of independent) {
+          minX = Math.min(minX, n.x);
+          minY = Math.min(minY, n.y);
+          maxX = Math.max(maxX, n.x + n.width);
+          maxY = Math.max(maxY, n.y + n.height);
         }
+        this.arrangeRingCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
       }
-      fitContainerToChildren(this.doc, containerId);
+      params = { ...p, ring: { ...p.ring, center: this.arrangeRingCenter } };
+    } else {
+      this.arrangeRingCenter = null;
+    }
+    const positions = computeArrange(
+      independent.map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height })),
+      params,
+    );
+    this.doc.live(() => {
+      for (const n of nodes) {
+        const target = positions.get(n.id);
+        if (target) {
+          n.x = target.x;
+          n.y = target.y;
+          continue;
+        }
+        // 跟随者：累加选中链上各祖先容器的位移（嵌套容器逐级传递）
+        let dx = 0;
+        let dy = 0;
+        let pid = n.containerId;
+        const guard = new Set<string>();
+        while (pid && !guard.has(pid)) {
+          guard.add(pid);
+          const parent = this.doc.getNode(pid);
+          if (!parent) break;
+          const pp = positions.get(parent.id);
+          if (pp) {
+            dx += pp.x - parent.x;
+            dy += pp.y - parent.y;
+          }
+          pid = parent.containerId;
+        }
+        n.x += dx;
+        n.y += dy;
+      }
     });
+    if (this.arrangeTimer) window.clearTimeout(this.arrangeTimer);
+    this.arrangeTimer = window.setTimeout(() => {
+      this.arrangeTimer = null;
+      this.arrangeCommit();
+    }, 300);
   }
 
-  toggleContainerCollapse(containerId: string): void {
-    toggleCollapse(this.doc, containerId);
+  /** 结束排列会话：落一条撤销记录；与起点一致（无实际位移）不入栈 */
+  private arrangeCommit(): void {
+    const starts = this.arrangeStarts;
+    this.arrangeStarts = new Map();
+    this.arrangeRingCenter = null;
+    if (!starts.size) return;
+    let moved = false;
+    for (const [id, s] of starts) {
+      const n = this.doc.getNode(id);
+      if (!n || n.x !== s.x || n.y !== s.y) {
+        moved = true;
+        break;
+      }
+    }
+    if (moved) this.doc.commitPositions('排列', starts);
+  }
+
+  deleteSelection(): void {
+    // 选中集合里可能含连线 id：节点/连线分别删除（删除容器时其子节点转为自由元素）
+    const nodeIds = [...this.doc.selection].filter((id) => this.doc.getNode(id));
+    const edgeIds = [...this.doc.selection].filter((id) => this.doc.getEdge(id));
+    if (nodeIds.length) this.doc.removeNodes(nodeIds);
+    if (edgeIds.length) this.doc.removeEdges(edgeIds);
+    ui.labelEdit = null;
+  }
+
+  /**
+   * 双击线段：在曲线/折线中点内联编辑关系描述（连线写 label 标准字段，线类形状写扩展字段）。
+   * 编辑框挂在 ui.labelEdit，由 App 层渲染；视口变化时关闭（位置会失随）。
+   */
+  beginLabelEdit(kind: 'edge' | 'node', id: string): void {
+    const mid = this.labelMidpoint(kind, id);
+    if (!mid) return;
+    const p = this.engine.worldToScreen(mid.x, mid.y);
+    const current = kind === 'edge' ? this.doc.getEdge(id)?.label : this.doc.getNode(id)?.label;
+    ui.propsOpen = true;
+    ui.labelEdit = { kind, id, x: p.x, y: p.y, value: current ?? '' };
+  }
+
+  /** 提交关系描述（空串 = 清除） */
+  commitLabelEdit(value: string): void {
+    const le = ui.labelEdit;
+    ui.labelEdit = null;
+    if (!le) return;
+    const v = value.trim();
+    const cur = le.kind === 'edge' ? this.doc.getEdge(le.id)?.label ?? '' : this.doc.getNode(le.id)?.label ?? '';
+    if (v === cur.trim()) return;
+    if (le.kind === 'edge') this.doc.updateEdge(le.id, { label: v || undefined }, '编辑关系描述');
+    else this.doc.updateNode(le.id, { label: v || undefined }, '编辑关系描述');
+  }
+
+  /** 线段中点（世界坐标）：双端绑定曲线取贝塞尔中点，折线按弧长取中点 */
+  private labelMidpoint(kind: 'edge' | 'node', id: string): { x: number; y: number } | null {
+    if (kind === 'edge') {
+      const e = this.doc.getEdge(id);
+      if (!e) return null;
+      const from = this.doc.getNode(e.fromNode);
+      const to = this.doc.getNode(e.toNode);
+      if (!from || !to) return null;
+      const flat = this.edgeCurve(e, nodeRect(from), nodeRect(to));
+      return flat ? cubicMidpoint(flat) : null;
+    }
+    const n = this.doc.getNode(id);
+    if (!n) return null;
+    if (n.fromNode && n.toNode) {
+      const f = this.doc.getNode(n.fromNode);
+      const t = this.doc.getNode(n.toNode);
+      if (f && t) {
+        const curve = arrowCurve(n, (x) => this.doc.getNode(x));
+        if (curve) return cubicMidpoint(curve.path);
+      }
+    }
+    const pts = (n.points ?? [
+      [0, 0],
+      [n.width, n.height],
+    ]) as Array<number[] | { x: number; y: number }>;
+    return polylineMidpoint(pts.map((p) => (Array.isArray(p) ? { x: n.x + p[0]!, y: n.y + p[1]! } : p)));
+  }
+
+  private edgeCurve(e: { fromNode: string; toNode: string; fromSide?: string; toSide?: string; kind?: string }, from: Rect, to: Rect): number[] | null {
+    if (e.kind === 'mindmap') return mindmapEdgeCurve(from, to).path.flatMap((p) => [p.x, p.y]);
+    const sides = inferSides(from, to);
+    const fromSide = (e.fromSide ?? sides.fromSide) as 'top' | 'bottom' | 'left' | 'right';
+    const toSide = (e.toSide ?? sides.toSide) as 'top' | 'bottom' | 'left' | 'right';
+    return bezierPath(sideAnchor(from, fromSide), fromSide, sideAnchor(to, toSide), toSide).path.flatMap((p) => [p.x, p.y]);
+  }
+
+  // ---------- 导图 ----------
+
+  /** 升级为导图主节点（属性面板 / 右键菜单入口） */
+  upgradeMapRoot(nodeId: string): void {
+    upgradeToMapRoot(this.doc, nodeId);
+  }
+
+  /** 取消导图主节点：清除标记，子树内导图连线转为普通连线 */
+  downgradeMapRoot(nodeId: string): void {
+    clearMapRoot(this.doc, nodeId);
+  }
+
+  /** Tab：给选中的导图节点添加子节点（文本框）并进入编辑；返回是否已处理 */
+  addMapChildTo(nodeId: string): boolean {
+    const id = addMapChild(this.doc, nodeId, this.mapStyleFor(nodeId));
+    if (!id) return false;
+    this.doc.setSelection([id]);
+    this.beginPathTextEdit(id);
+    return true;
+  }
+
+  /** Enter：给选中的导图子节点添加同级节点（文本框）并进入编辑；返回是否已处理 */
+  addMapSiblingOf(nodeId: string): boolean {
+    const id = addMapSibling(this.doc, nodeId, this.mapStyleFor(nodeId));
+    if (!id) return false;
+    this.doc.setSelection([id]);
+    this.beginPathTextEdit(id);
+    return true;
+  }
+
+  /** 导图新节点的文字样式：继承参考节点，缺省回落到全局文本默认 */
+  private mapStyleFor(nodeId: string): MapNodeStyle {
+    const n = this.doc.getNode(nodeId);
+    return {
+      fontSize: n?.fontSize ?? this.settings.text.fontSize,
+      fontFamily: n?.fontFamily ?? this.settings.text.fontFamily,
+      fontWeight: n?.fontWeight ?? this.settings.text.fontWeight,
+      color: n?.color ?? this.settings.text.color,
+    };
   }
 
   /** 重命名容器：只选中该容器并聚焦属性面板的名称输入框（双击名片 / 右键菜单触发） */
@@ -586,21 +767,21 @@ export class CanvasApp {
 
   /** 设置面板修改后防抖持久化（宿主默认值） */
   persistSettingsSoon(): void {
-    if (this.persistTimer) clearTimeout(this.persistTimer);
-    this.persistTimer = setTimeout(() => {
+    if (this.persistTimer) window.clearTimeout(this.persistTimer);
+    this.persistTimer = window.setTimeout(() => {
       this.persistTimer = null;
       void this.adapter.saveDefaults?.(JSON.parse(JSON.stringify(this.settings)));
     }, 800);
   }
 
   private scheduleSave(): void {
-    if (this.saveTimer) clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => this.flushSave(), 400);
+    if (this.saveTimer) window.clearTimeout(this.saveTimer);
+    this.saveTimer = window.setTimeout(() => this.flushSave(), 400);
   }
 
   async flushSave(): Promise<void> {
     if (this.saveTimer) {
-      clearTimeout(this.saveTimer);
+      window.clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
     const text = serializeDoc(this.doc);
@@ -626,10 +807,55 @@ export class CanvasApp {
   }
 
   retheme(): void {
-    this.palette = this.adapter.palette?.() ?? readPalette();
+    this.applyTheme();
+  }
+
+  /** 当前生效的日夜形态：强制模式直接取，跟随系统按宿主 body 主题类判断 */
+  themeKind(): 'dark' | 'light' {
+    if (this.settings.theme === 'dark') return 'dark';
+    if (this.settings.theme === 'light') return 'light';
+    return /theme-dark/.test(document.body.className) ? 'dark' : 'light';
+  }
+
+  /**
+   * 解析当前主题下的调色板与画布背景。两者必须同源：`palette.canvasBg` 是「垫底色」——
+   * 关系描述小牌、容器名片、空心箭头内芯、缩略图底、缺图占位等都拿它去遮住身后的线条/点阵，
+   * 必须等于背景层真正绘制出来的颜色（`background.color`，见 BackgroundRenderer.draw）。
+   * 取值与理由见 resolveThemedPalette。
+   */
+  private resolveThemePalette(): void {
+    this.background = effectiveBackground(this.settings.background, this.themeKind());
+    this.palette = resolveThemedPalette(this.settings.theme, this.background, this.hostEl ?? undefined);
+  }
+
+  /** 按设置的主题模式解析调色板并整体重绘；主题翻转时同步元素默认色 */
+  applyTheme(): void {
+    this.resolveThemePalette();
+    const kind = this.themeKind();
+    if (this.appliedKind && this.appliedKind !== kind) {
+      // 沿用「日间默认色」的文字/描边随主题翻转（用户自定义色不参与），实时生效不进撤销栈
+      const to = kind;
+      this.doc.live(() => remapThemeDefaultColors(this.doc.nodes, to));
+    }
+    this.appliedKind = kind;
     this.engine.retheme(this.palette);
+    this.applyBackground();
     // 调色板已替换：通知 UI 侧重绘（缩略图等直接读取 palette 的派生渲染）
     bumpRev();
+  }
+
+  /** 画布背景/点阵/网格随主题适配（仅默认值切换，自定义颜色保留），推送到渲染层 */
+  applyBackground(): void {
+    this.background = effectiveBackground(this.settings.background, this.themeKind());
+    this.engine.background.setSettings(this.background);
+    this.engine.setCanvasBgColor(this.background.color);
+  }
+
+  /** 状态栏主题切换入口：夜间 → 跟随系统 → 日间 → 夜间 */
+  cycleTheme(): void {
+    this.settings.theme = this.settings.theme === 'dark' ? 'system' : this.settings.theme === 'system' ? 'light' : 'dark';
+    this.applyTheme();
+    this.persistSettingsSoon();
   }
 
   // ---------- 导出 ----------
@@ -666,6 +892,11 @@ export class CanvasApp {
 
   destroy(): void {
     this.commitSelectionStyle();
+    if (this.arrangeTimer) {
+      window.clearTimeout(this.arrangeTimer);
+      this.arrangeTimer = null;
+    }
+    this.arrangeCommit();
     this.flushSave();
     for (const d of this.disposers) d();
     this.disposers = [];

@@ -6,11 +6,15 @@
  */
 import Konva from 'konva';
 import type { Document } from '../core/Document';
-import { isContainerNode } from '../core/types';
+import { isContainerNode, isLineLike } from '../core/types';
+import { paintOrder } from '../core/zorder';
+import { arrowCurve, isBoundCurve, sampleCubic, syncBoundArrow } from '../core/arrowLink';
+import { bezierPath, mindmapEdgeCurve, inferSides, sideAnchor } from '../core/geometry';
 import { rectsIntersect, unionRect, type Rect, type Vec, nodeRect, rectContains } from '../core/geometry';
 import type { BackgroundSettings, LaserSettings } from '../core/defaults';
 import type { Palette } from './palette';
-import { NodeView, hitTestNode, type FileUrlResolver } from './NodeView';
+import { darkenColor } from './palette';
+import { NodeView, hitTestNode, pointsOf, type FileUrlResolver } from './NodeView';
 import { EdgeView } from './EdgeView';
 import { BackgroundRenderer } from './BackgroundRenderer';
 import { Overlay, type OverlayState } from './Overlay';
@@ -30,6 +34,7 @@ export const MAX_SCALE = 5;
 
 export type PickResult =
   | { kind: 'node'; nodeId: string }
+  | { kind: 'edge'; edgeId: string }
   | { kind: 'container-band'; containerId: string }
   | { kind: 'canvas' };
 
@@ -37,6 +42,7 @@ export function emptyOverlayState(): OverlayState {
   return {
     selection: [],
     handles: null,
+    endpoints: null,
     marquee: null,
     guides: [],
     eraserCursor: null,
@@ -47,6 +53,7 @@ export function emptyOverlayState(): OverlayState {
     lineDraft: null,
     edgeDraft: null,
     ports: [],
+    edgeSelect: null,
   };
 }
 
@@ -89,6 +96,8 @@ export class Engine {
   private fileUrlResolver: FileUrlResolver | null = null;
   /** 文本节点位图缓存（跨节点共享，按像素预算限量；见 textRaster.ts） */
   private textRaster = new TextRasterCache();
+  /** 容器名片底色：画布底色加深（随设置面板改色实时更新，见 setCanvasBgColor） */
+  private plateBg = '#ececec';
 
   constructor(
     container: HTMLDivElement,
@@ -103,6 +112,7 @@ export class Engine {
     this.palette = palette;
     // 必须在首次 render 之前就位：NodeView 构造时即用它解析 file 节点 URL
     this.fileUrlResolver = fileUrlResolver;
+    this.plateBg = darkenColor(bg.color);
     this.stage = new Konva.Stage({ container, width: container.clientWidth || 800, height: container.clientHeight || 600 });
     this.buildLayers(bg, laserSettings);
     doc.events.on('changed', () => this.render());
@@ -117,6 +127,16 @@ export class Engine {
   setFileUrlResolver(fn: FileUrlResolver): void {
     this.fileUrlResolver = fn;
     for (const v of this.nodeViews.values()) v.setFileUrlResolver(fn);
+  }
+
+  /** 画布底色变化（设置面板改色）：同步容器名片底色（画布底色加深） */
+  setCanvasBgColor(color: string): void {
+    const next = darkenColor(color);
+    if (next === this.plateBg) return;
+    this.plateBg = next;
+    for (const v of this.nodeViews.values()) {
+      if (isContainerNode(v.node)) v.setPlateBg(next);
+    }
   }
 
   /** 外部文件变更（重命名/删除/覆盖）后失效所有图片缓存并重建图片视图 */
@@ -241,17 +261,24 @@ export class Engine {
 
   render(): void {
     const doc = this.doc;
-    // 节点视图同步
+    const get = (id: string) => doc.getNode(id);
+    // 节点视图同步（绑定箭头先把锚点写回折点/包围盒，再按双端绑定推导贝塞尔路径）
     for (const n of doc.nodes) {
+      let curve: number[] | null = null;
+      if (isLineLike(n) && (n.fromNode || n.toNode)) {
+        syncBoundArrow(n, get);
+        if (isBoundCurve(n, get)) curve = arrowCurve(n, get)?.path ?? null;
+      }
       let v = this.nodeViews.get(n.id);
       if (!v) {
         // 解析器与文本位图缓存随构造注入：file 节点的首个视图就能解析出可加载 URL
-        v = new NodeView(n, this.palette, this.cacheApi, this.fileUrlResolver, this.textRaster);
+        v = new NodeView(n, this.palette, this.cacheApi, this.fileUrlResolver, this.textRaster, () => this.plateBg);
+        v.update(n, { curve });
         this.nodeViews.set(n.id, v);
         this.nodeGroup.add(v.group);
       } else {
         // 视图更新：图片 URL 变化（外部文件重命名等）→ 缓存键变化，新 URL 自动重新加载
-        v.update(n);
+        v.update(n, { curve });
       }
     }
     for (const [id, v] of [...this.nodeViews]) {
@@ -260,8 +287,9 @@ export class Engine {
         this.nodeViews.delete(id);
       }
     }
-    // Z 顺序 = 数组顺序（节点组内部从 0 计数；edgeGroup 在 world 中位于 nodeGroup 之下）
-    doc.nodes.forEach((n, i) => {
+    // Z 顺序 = 数组顺序（节点组内部从 0 计数；edgeGroup 在 world 中位于 nodeGroup 之下），
+    // 但容器要下移到自己的内容之下 —— 容器背景填充不能盖住容器里的节点（见 core/zorder）
+    paintOrder(doc.nodes).forEach((n, i) => {
       const v = this.nodeViews.get(n.id);
       if (v && v.group.getZIndex() !== i) v.group.setZIndex(i);
     });
@@ -293,15 +321,7 @@ export class Engine {
   isNodeHidden(id: string): boolean {
     if (this.erasedIds.has(id)) return true;
     if (this.editingNodeId === id) return true;
-    const n = this.doc.getNode(id);
-    if (!n) return true;
-    if (this.doc.isHiddenByCollapse(n)) return true;
-    // 容器折叠隐藏全部内部节点
-    if (n.containerId) {
-      const c = this.doc.getNode(n.containerId);
-      if (c?.collapsed) return true;
-    }
-    return false;
+    return !this.doc.getNode(id);
   }
 
   /** 视口裁剪：仅渲染可见区域 */
@@ -333,11 +353,29 @@ export class Engine {
 
   pick(wx: number, wy: number): PickResult {
     const nodes = this.doc.nodes;
+    const get = (id: string) => this.doc.getNode(id);
     for (let i = nodes.length - 1; i >= 0; i--) {
       const n = nodes[i];
       if (isContainerNode(n)) continue;
       if (this.isNodeHidden(n.id)) continue;
-      if (hitTestNode(n, wx, wy, this.palette)) return { kind: 'node', nodeId: n.id };
+      if (hitTestNode(n, wx, wy, this.palette, this.vp.scale, get)) return { kind: 'node', nodeId: n.id };
+    }
+    // 连线（渲染在节点下层，命中也放在节点之后）：按曲线采样折线测距
+    for (let i = this.doc.edges.length - 1; i >= 0; i--) {
+      const e = this.doc.edges[i];
+      if (this.isNodeHidden(e.fromNode) || this.isNodeHidden(e.toNode)) continue;
+      const from = this.doc.getNode(e.fromNode);
+      const to = this.doc.getNode(e.toNode);
+      if (!from || !to) continue;
+      const flat = edgeCurvePath(e, nodeRect(from), nodeRect(to));
+      if (!flat) continue;
+      const s = sampleCubic(flat);
+      const maxDist = Math.max(8, 6 / this.vp.scale);
+      for (let k = 0; k + 3 < s.length; k += 2) {
+        if (segDist2({ x: wx, y: wy }, { x: s[k]!, y: s[k + 1]! }, { x: s[k + 2]!, y: s[k + 3]! }) <= maxDist) {
+          return { kind: 'edge', edgeId: e.id };
+        }
+      }
     }
     // 容器边带（内部空白穿透）+ 左上角名片
     for (let i = nodes.length - 1; i >= 0; i--) {
@@ -369,11 +407,23 @@ export class Engine {
     const st = this.overlayState;
     // 编辑中的节点隐藏选中框/手柄，保证编辑态与渲染态视觉一致
     const selected = this.doc.selectedNodes().filter((n) => !this.isNodeHidden(n.id) && n.id !== this.editingNodeId);
-    st.selection = selected.map((n) => nodeRect(n));
     st.handles = null;
-    if (st.selection.length === 1 && !st.erasePreview.length && selected[0]) {
-      // 文本框高度由内容自适应：拖拽上下无法改变高度，不提供上下中点手柄
-      st.handles = selected[0].type === 'text' ? { ...st.selection[0], hideVertical: true } : st.selection[0];
+    st.endpoints = null;
+    const single = !st.erasePreview.length && selected.length === 1 ? selected[0] : null;
+    if (single && isLineLike(single)) {
+      // 线类（直线/箭头/折线）单选：不画包围盒边框，只显示端点手柄 —— 拖端点改形状。
+      // 端点坐标必须过翻转镜像：flip 时视觉端点 ≠ 原始折点，手柄才会落在真实的头尾上
+      st.selection = [];
+      st.endpoints = pointsOf(single).map(([px, py]) => ({
+        x: single.x + (single.flipX ? single.width - px : px),
+        y: single.y + (single.flipY ? single.height - py : py),
+      }));
+    } else {
+      st.selection = selected.map((n) => nodeRect(n));
+      if (single) {
+        // 文本框高度由内容自适应：拖拽上下无法改变高度，不提供上下中点手柄
+        st.handles = single.type === 'text' ? { ...st.selection[0], hideVertical: true } : st.selection[0];
+      }
     }
     if (this.focusNodeId) {
       const f = this.doc.getNode(this.focusNodeId);
@@ -381,6 +431,35 @@ export class Engine {
       if (!f) this.focusNodeId = null;
     } else {
       st.focus = null;
+    }
+    // 选中线高亮：连线（贝塞尔控制点）或线类节点（绑定箭头取贝塞尔，折线取顶点）
+    st.edgeSelect = null;
+    for (const id of this.doc.selection) {
+      const e = this.doc.getEdge(id);
+      if (e) {
+        const from = this.doc.getNode(e.fromNode);
+        const to = this.doc.getNode(e.toNode);
+        if (!from || !to) break;
+        const path = edgeCurvePath(e, nodeRect(from), nodeRect(to));
+        if (path) st.edgeSelect = { path, bezier: true };
+        break;
+      }
+      const n = this.doc.getNode(id);
+      if (n && isLineLike(n)) {
+        if (n.fromNode && n.toNode) {
+          const curve = arrowCurve(n, (x) => this.doc.getNode(x));
+          if (curve) {
+            st.edgeSelect = { path: curve.path, bezier: true };
+            break;
+          }
+        }
+        const pts = pointsOf(n).map(([px, py]) => ({
+          x: n.x + (n.flipX ? n.width - px : px),
+          y: n.y + (n.flipY ? n.height - py : py),
+        }));
+        st.edgeSelect = { path: pts.flatMap((p) => [p.x, p.y]), bezier: false };
+        break;
+      }
     }
     st.containerHover = this.hoverContainerId
       ? (() => {
@@ -446,6 +525,32 @@ export class Engine {
     this.laser.destroy();
     this.stage.destroy();
   }
+}
+
+/** 连线曲线几何（与 EdgeView 渲染同源）：普通连线三次贝塞尔 / 导图专用曲线 */
+function edgeCurvePath(
+  e: { fromNode: string; toNode: string; fromSide?: string; toSide?: string; kind?: string },
+  from: Rect,
+  to: Rect,
+): number[] | null {
+  if (e.kind === 'mindmap') {
+    return mindmapEdgeCurve(from, to).path.flatMap((p) => [p.x, p.y]);
+  }
+  const sides = inferSides(from, to);
+  const fromSide = (e.fromSide ?? sides.fromSide) as 'top' | 'bottom' | 'left' | 'right';
+  const toSide = (e.toSide ?? sides.toSide) as 'top' | 'bottom' | 'left' | 'right';
+  const { path } = bezierPath(sideAnchor(from, fromSide), fromSide, sideAnchor(to, toSide), toSide);
+  return path.flatMap((p) => [p.x, p.y]);
+}
+
+function segDist2(p: Vec, a: Vec, b: Vec): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const l2 = dx * dx + dy * dy;
+  if (l2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
 }
 
 function inContainerBand(n: Rect & { width: number; height: number }, wx: number, wy: number): boolean {

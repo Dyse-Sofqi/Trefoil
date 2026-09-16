@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import type { HostAdapter } from './host';
   import type { TrefoilSettings } from '../core/defaults';
   import { CanvasApp } from './CanvasApp';
@@ -9,6 +9,7 @@
   import SettingsPanel from './SettingsPanel.svelte';
   import ContextMenuSvelte from './ContextMenu.svelte';
   import TextEditorOverlay from './TextEditorOverlay.svelte';
+  import LabelEditor from './LabelEditor.svelte';
   import StatusBar from './StatusBar.svelte';
   import Minimap from './Minimap.svelte';
   import HelpModal from './HelpModal.svelte';
@@ -42,13 +43,18 @@
   });
 
   // 设置变化 → 推送到引擎 + 防抖持久化
+  // 依赖只有 settings 本身（深度追踪）；推送动作内部（applyTheme 的调色板/背景读取与
+  // bumpRev 写 ui.rev、laser 引擎存储）若被纳入追踪会形成读写闭环 —— effect 无限重跑，
+  // Svelte 调度器在 depth exceeded 后死亡，整个 UI 冻结（双击进编辑等全部失效），必须 untrack。
   $effect(() => {
     JSON.stringify(settings);
-    if (app) {
-      app.engine.background.setSettings({ ...settings.background });
-      app.engine.laser.setSettings({ ...settings.laser });
-      app.persistSettingsSoon();
-    }
+    untrack(() => {
+      if (app) {
+        app.applyTheme();
+        app.engine.laser.setSettings({ ...settings.laser });
+        app.persistSettingsSoon();
+      }
+    });
   });
 </script>
 
@@ -63,6 +69,7 @@
     {/if}
     <ContextMenuSvelte {app} />
     <TextEditorOverlay {app} />
+    <LabelEditor {app} />
     {#if ui.settingsOpen}
       <SettingsPanel {app} />
     {/if}
