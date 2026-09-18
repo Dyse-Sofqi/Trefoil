@@ -7,12 +7,16 @@ import type { Rect, Vec } from '../core/geometry';
 import type { ArrowHeadStyle } from '../core/types';
 import type { Guide } from '../core/snap';
 import type { Palette } from './palette';
-import { arrowHeadParts, addHeadShapes } from './arrowHead';
+import { arrowPaintShape } from './arrowPaint';
 
 export type HandleId = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 /** 线类节点（直线/箭头/折线）的端点手柄 id：pt0 = 起点、pt1 = 终点 */
 export type PointHandleId = `pt${number}`;
-export type ToolHandleId = HandleId | PointHandleId;
+/** 连线（Edge）的端点手柄 id：拖端点重新绑定 fromNode / toNode */
+export type EdgeHandleId = 'edge-from' | 'edge-to';
+/** 旋转手柄 id（单选块状元素顶部）：拖拽绕中心旋转 */
+export type RotateHandleId = 'rotate';
+export type ToolHandleId = HandleId | PointHandleId | EdgeHandleId | RotateHandleId;
 
 export interface HandleHit {
   id: ToolHandleId;
@@ -22,13 +26,25 @@ export interface HandleHit {
   h: number;
 }
 
+/** 旋转手柄伸出长度（屏幕像素）：从旋转后顶部中点向上延伸，不随画布缩放变形 */
+const ROTATE_HANDLE_LEN = 22;
+
 export interface OverlayState {
   /** 世界坐标选择框 → 转屏幕 */
   selection: Rect[];
-  /** 单选时的缩放手柄（屏幕坐标）；hideVertical = 高度自适应的节点（文本），上下中点手柄不参与缩放 */
-  handles: (Rect & { hideVertical?: boolean }) | null;
+  /** 单选时的缩放手柄（屏幕坐标）；cornerOnly = 高度自适应的节点（文本），只保留四角手柄 */
+  handles: (Rect & { cornerOnly?: boolean }) | null;
   /** 单选线类节点（直线/箭头/折线）的端点手柄（世界坐标）：拖端点改形状，替代四角缩放手柄 */
   endpoints: Vec[] | null;
+  /**
+   * 单选连线（Edge）的端点手柄（世界坐标）：拖端点重新绑定 fromNode / toNode
+   */
+  edgeEndpoints: { id: EdgeHandleId; pos: Vec }[] | null;
+  /**
+   * 单选块状元素的旋转手柄（世界坐标）：angle = 当前旋转角（度）、rect = 节点矩形、
+   * center = 旋转中心、top = 旋转后顶部中点（手柄锚点）。旋转非零时选中框随角度画出。
+   */
+  rotation: { angle: number; rect: Rect; center: Vec; top: Vec } | null;
   marquee: Rect | null;
   guides: Guide[];
   /** 橡皮擦 */
@@ -48,13 +64,15 @@ export interface OverlayState {
   edgeSelect: { path: number[]; bezier: boolean } | null;
   /** 箭头工具 Ports 提示（世界坐标锚点） */
   ports: Vec[];
+  /** 当前端点磁吸目标锚点（世界坐标）：拖端点/绘图时悬停在可连接元素附近时高亮显示 */
+  magnet: Vec | null;
 }
 
 export class Overlay {
   private group = new Konva.Group({ listening: false });
   private handles: HandleHit[] = [];
-  /** 端点手柄命中区（屏幕坐标），handleAt 时优先于缩放手柄 */
-  private pointHandles: { id: PointHandleId; x: number; y: number }[] = [];
+  /** 端点手柄命中区（屏幕坐标），handleAt 时优先于缩放手柄（pt* = 线类端点，edge-* = 连线端点，rotate = 旋转柄） */
+  private pointHandles: { id: ToolHandleId; x: number; y: number }[] = [];
   private palette: Palette;
 
   constructor(private layer: Konva.Layer, palette: Palette) {
@@ -69,7 +87,7 @@ export class Overlay {
   handleAt(sx: number, sy: number): HandleHit | null {
     // 端点手柄最优先：线类端点与四角缩放手柄本来就重叠（箭头两端 = 包围盒角点），
     // 端点语义（改形状）必须压过缩放语义，否则箭头两头永远抓不到
-    let bestPt: { id: PointHandleId; x: number; y: number } | null = null;
+    let bestPt: { id: ToolHandleId; x: number; y: number } | null = null;
     let bestPtDist = Infinity;
     for (const p of this.pointHandles) {
       const d = Math.hypot(sx - p.x, sy - p.y);
@@ -142,7 +160,8 @@ export class Overlay {
         ['w', sx, sy + sh / 2],
       ];
       for (const [id, hx, hy] of defs) {
-        if (r.hideVertical && (id === 'n' || id === 's')) continue; // 高度自适应：上下中点手柄不出现
+        // 文本：高度由内容自适应、宽度随手柄拖动，只保留四角手柄（两侧中点手柄不出现）
+        if (r.cornerOnly && (id === 'n' || id === 's' || id === 'e' || id === 'w')) continue;
         const size = 8;
         g.add(
           new Konva.Rect({
@@ -159,6 +178,57 @@ export class Overlay {
         );
         this.handles.push({ id, x: hx - size / 2, y: hy - size / 2, w: size, h: size });
       }
+    }
+
+    // 旋转手柄（单选块状元素顶部）：柄从旋转后的顶部中点伸出（屏幕恒定长度）。
+    // 已旋转的元素选中框随角度重画（与此前的 axis-aligned 框一致，不再画两条框）。
+    if (state.rotation) {
+      const rt = state.rotation;
+      const c = { x: toSX(rt.center.x), y: toSY(rt.center.y) };
+      const t = { x: toSX(rt.top.x), y: toSY(rt.top.y) };
+      if (rt.angle !== 0) {
+        g.add(
+          new Konva.Rect({
+            x: c.x,
+            y: c.y,
+            offsetX: (rt.rect.width * scale) / 2,
+            offsetY: (rt.rect.height * scale) / 2,
+            width: rt.rect.width * scale,
+            height: rt.rect.height * scale,
+            rotation: rt.angle,
+            stroke: p.accent,
+            strokeWidth: 1.5,
+            listening: false,
+          }),
+        );
+      }
+      let dx = t.x - c.x;
+      let dy = t.y - c.y;
+      const len = Math.hypot(dx, dy) || 1;
+      dx /= len;
+      dy /= len;
+      const hx = t.x + dx * ROTATE_HANDLE_LEN;
+      const hy = t.y + dy * ROTATE_HANDLE_LEN;
+      g.add(
+        new Konva.Line({
+          points: [t.x, t.y, hx, hy],
+          stroke: p.accent,
+          strokeWidth: 1.5,
+          listening: false,
+        }),
+      );
+      g.add(
+        new Konva.Circle({
+          x: hx,
+          y: hy,
+          radius: 6,
+          fill: '#ffffff',
+          stroke: p.accent,
+          strokeWidth: 1.4,
+          listening: false,
+        }),
+      );
+      this.pointHandles.push({ id: 'rotate', x: hx, y: hy });
     }
 
     // 线类端点手柄（单选直线/箭头/折线）：圆点样式，拖动直接改折点（包围盒跟随重排）
@@ -178,6 +248,25 @@ export class Overlay {
         }),
       );
       this.pointHandles.push({ id: `pt${i}`, x: hx, y: hy });
+    }
+
+    // 连线端点手柄（单选连线）：圆点样式，拖端点重新绑定 fromNode / toNode（与 pt 手柄同优先级）
+    for (const ep of state.edgeEndpoints ?? []) {
+      const hx = toSX(ep.pos.x);
+      const hy = toSY(ep.pos.y);
+      const r = 5;
+      g.add(
+        new Konva.Circle({
+          x: hx,
+          y: hy,
+          radius: r,
+          fill: '#ffffff',
+          stroke: p.accent,
+          strokeWidth: 1.6,
+          listening: false,
+        }),
+      );
+      this.pointHandles.push({ id: ep.id, x: hx, y: hy });
     }
 
     // 框选
@@ -327,22 +416,16 @@ export class Overlay {
       const b = { x: toSX(ld.b.x), y: toSY(ld.b.y) };
       const head = ld.arrow ? (ld.head ?? 'solid') : 'none';
       const tail = ld.arrow ? (ld.tail ?? 'none') : 'none';
-      const headParts = arrowHeadParts(a, b, 1.8, head);
-      const tailParts = arrowHeadParts(b, a, 1.8, tail);
-      const sa = tailParts ? tailParts.shaftEnd : a;
-      const sb = headParts ? headParts.shaftEnd : b;
       g.add(
-        new Konva.Line({
-          points: [sa.x, sa.y, sb.x, sb.y],
-          stroke: p.accent,
-          strokeWidth: 1.8,
-          lineCap: 'round',
-          lineJoin: 'round',
-          listening: false,
-        }),
+        arrowPaintShape(() => ({
+          pts: [a, b],
+          sw: 1.8,
+          head,
+          tail,
+          color: p.accent,
+          bg: p.canvasBg,
+        })),
       );
-      if (tailParts) addHeadShapes(g, tailParts, p.accent, 1.8, p.canvasBg);
-      if (headParts) addHeadShapes(g, headParts, p.accent, 1.8, p.canvasBg);
     }
 
     // 选中线高亮（与原路径同曲线模式，贴合线身）
@@ -384,6 +467,33 @@ export class Overlay {
           fill: '#fff',
           stroke: p.accent,
           strokeWidth: 1.5,
+          listening: false,
+        }),
+      );
+    }
+
+    // 当前磁吸目标锚点（高亮）：松手会吸附到的确切位置，随指针就近切换上/下/左/右
+    if (state.magnet) {
+      const mx = toSX(state.magnet.x);
+      const my = toSY(state.magnet.y);
+      g.add(
+        new Konva.Circle({
+          x: mx,
+          y: my,
+          radius: 7,
+          fill: p.accent,
+          stroke: '#ffffff',
+          strokeWidth: 2,
+          opacity: 0.9,
+          listening: false,
+        }),
+      );
+      g.add(
+        new Konva.Circle({
+          x: mx,
+          y: my,
+          radius: 2.5,
+          fill: '#ffffff',
           listening: false,
         }),
       );

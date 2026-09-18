@@ -23,6 +23,12 @@ interface TrefoilState extends Record<string, unknown> {
 export default class TrefoilPlugin extends Plugin {
   trefoilSettings: TrefoilPluginSettings = DEFAULT_PLUGIN_SETTINGS;
   errorLogger: ErrorLogger | null = null;
+  /** 主题重绘的 rAF 句柄（去重：同一帧内多次触发只重绘一次） */
+  private rethemeRaf = 0;
+  /** body 主题类监听器：css-change 有时先于类翻转触发，用它兜底 */
+  private bodyObserver: MutationObserver | null = null;
+  /** 最近一次观察到的深色状态（body class 是否含 theme-dark） */
+  private lastThemeDark = false;
 
   async onload(): Promise<void> {
     this.errorLogger = new ErrorLogger(this);
@@ -138,13 +144,55 @@ export default class TrefoilPlugin extends Plugin {
       }),
     );
 
-    // 主题切换 → 重新着色
-    this.registerEvent(this.app.workspace.on('css-change', () => this.rethemeViews()));
+    // 主题切换 → 重新着色。css-change 与 body 主题类翻转都可能单独/先后到达，
+    // 统一走 scheduleRetheme（延迟到下一帧 + 去重），避免读到旧主题。
+    this.registerEvent(this.app.workspace.on('css-change', () => this.scheduleRetheme()));
+    this.startThemeWatch();
   }
 
   onunload(): void {
+    this.bodyObserver?.disconnect();
+    this.bodyObserver = null;
+    if (this.rethemeRaf) {
+      cancelAnimationFrame(this.rethemeRaf);
+      this.rethemeRaf = 0;
+    }
     this.errorLogger?.uninstall();
     this.errorLogger = null;
+  }
+
+  /**
+   * 主题切换 → 延迟到下一帧统一重新着色。
+   *
+   * 为什么不能直接在事件回调里读：Obsidian 切换主题是「翻转 body 主题类 + 换主题 CSS +
+   * 触发 css-change」的组合，顺序并不稳定 —— css-change 有时先于 body 类翻转到达，
+   * 此刻 CanvasApp.themeKind()（读 body 类）与调色板（读 CSS 变量）拿到的还是旧主题，
+   * 画布就停在旧深浅色上，要再来回切一次才纠正。
+   *
+   * 对策两条腿走路（共用本方法去重，同一帧只重绘一次）：
+   * 1. css-change 依旧监听，但延迟到 requestAnimationFrame —— 本任务结束后、绘制前执行，
+   *    此时 body 类与样式表都已就位，读到的一定是新主题；
+   * 2. MutationObserver 盯 body 的 class 属性兜底 —— 类一翻转必然收到通知，再走同一延迟重绘，
+   *    即使这次切换没有派发 css-change 也不会丢。
+   */
+  private scheduleRetheme(): void {
+    if (this.rethemeRaf) return;
+    this.rethemeRaf = requestAnimationFrame(() => {
+      this.rethemeRaf = 0;
+      this.rethemeViews();
+    });
+  }
+
+  /** 兜底：body 的主题类一翻转（无论有没有 css-change）就触发统一重绘 */
+  private startThemeWatch(): void {
+    this.lastThemeDark = document.body.classList.contains('theme-dark');
+    this.bodyObserver = new MutationObserver(() => {
+      const dark = document.body.classList.contains('theme-dark');
+      if (dark === this.lastThemeDark) return;
+      this.lastThemeDark = dark;
+      this.scheduleRetheme();
+    });
+    this.bodyObserver.observe(document.body, { attributes: true, attributeFilter: ['class'] });
   }
 
   async saveTrefoilSettings(): Promise<void> {

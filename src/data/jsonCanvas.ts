@@ -33,6 +33,7 @@ const NODE_EXT_FIELDS = [
   'vAlign',
   'flipX',
   'flipY',
+  'rotation',
   'points',
   'headStyle',
   'tailStyle',
@@ -65,7 +66,11 @@ export function serializeDoc(doc: CanvasDoc): string {
     if (n.color !== undefined) out.color = n.color;
     for (const f of NODE_EXT_FIELDS) {
       const v = (n as unknown as Record<string, unknown>)[f];
-      if (v !== undefined && v !== null && v !== false && v !== '') out[`trefoil:${f}`] = v;
+      if (v !== undefined && v !== null && v !== false && v !== '') {
+        // rotation 0 = 默认不旋转，不落盘（fillOpacity 0 是合法取值仍保留，见容器背景）
+        if (f === 'rotation' && v === 0) continue;
+        out[`trefoil:${f}`] = v;
+      }
     }
     // 容器子节点 → 相对坐标
     if (n.containerId) {

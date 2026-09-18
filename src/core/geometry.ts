@@ -43,6 +43,50 @@ export function rectContains(r: Rect, p: Vec): boolean {
   return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
 }
 
+/** 两线段是否相交（标准跨立实验，含端点接触与共线重叠） */
+function segmentsIntersect(p1: Vec, p2: Vec, q1: Vec, q2: Vec): boolean {
+  const cross = (a: Vec, b: Vec, c: Vec) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  const d1 = cross(q1, q2, p1);
+  const d2 = cross(q1, q2, p2);
+  const d3 = cross(p1, p2, q1);
+  const d4 = cross(p1, p2, q2);
+  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return true;
+  const onSeg = (a: Vec, b: Vec, c: Vec) =>
+    c.x >= Math.min(a.x, b.x) - EPS &&
+    c.x <= Math.max(a.x, b.x) + EPS &&
+    c.y >= Math.min(a.y, b.y) - EPS &&
+    c.y <= Math.max(a.y, b.y) + EPS;
+  if (Math.abs(d1) <= EPS && onSeg(q1, q2, p1)) return true;
+  if (Math.abs(d2) <= EPS && onSeg(q1, q2, p2)) return true;
+  if (Math.abs(d3) <= EPS && onSeg(p1, p2, q1)) return true;
+  return Math.abs(d4) <= EPS && onSeg(p1, p2, q2);
+}
+
+const EPS = 1e-9;
+
+/** 线段与矩形是否相交（端点在框内、线段穿过框都算） */
+export function segmentIntersectsRect(a: Vec, b: Vec, r: Rect): boolean {
+  if (rectContains(r, a) || rectContains(r, b)) return true;
+  const tl = { x: r.x, y: r.y };
+  const tr = { x: r.x + r.width, y: r.y };
+  const br = { x: r.x + r.width, y: r.y + r.height };
+  const bl = { x: r.x, y: r.y + r.height };
+  return (
+    segmentsIntersect(a, b, tl, tr) ||
+    segmentsIntersect(a, b, tr, br) ||
+    segmentsIntersect(a, b, br, bl) ||
+    segmentsIntersect(a, b, bl, tl)
+  );
+}
+
+/**
+ * 线类（直线/箭头/折线/连线）的点选容差（世界单位）：贴着线实体才选中。
+ * 约半线宽 + 1px，且保证屏幕上约 ±4px 手感（缩放感知）—— 不随缩小放大误选区。
+ */
+export function lineHitTolerance(strokeSize: number | undefined, scale: number): number {
+  return Math.max((strokeSize ?? 2) / 2 + 1, 4 / Math.max(scale, 0.01));
+}
+
 export function unionRect(a: Rect | null, b: Rect): Rect {
   if (!a) return { ...b };
   const x = Math.min(a.x, b.x);
@@ -57,6 +101,31 @@ export function unionRect(a: Rect | null, b: Rect): Rect {
 
 export function rectCenter(r: Rect): Vec {
   return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+}
+
+/** 绕 center 旋转点（角度制，顺时针为正）；deg 为 0 时原样返回 */
+export function rotatePoint(p: Vec, center: Vec, deg: number): Vec {
+  if (deg === 0) return { x: p.x, y: p.y };
+  const r = (deg * Math.PI) / 180;
+  const cos = Math.cos(r);
+  const sin = Math.sin(r);
+  const dx = p.x - center.x;
+  const dy = p.y - center.y;
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  };
+}
+
+/** 节点旋转后的顶部中点（世界坐标）：旋转手柄的锚点（绕中心旋转前的上边中点旋转到新位置） */
+export function nodeTopCenter(n: CanvasNode): Vec {
+  const c = rectCenter(nodeRect(n));
+  return rotatePoint({ x: c.x, y: n.y }, c, n.rotation ?? 0);
+}
+
+/** 旋转角归一化到 [-180, 180)：序列化干净且视觉等价。旋转手柄拖拽与属性面板共用同一约定 */
+export function normalizeRotation(deg: number): number {
+  return ((deg + 180) % 360 + 360) % 360 - 180;
 }
 
 export function inflateRect(r: Rect, n: number): Rect {
@@ -111,6 +180,11 @@ export function sideAnchor(r: Rect, side: 'top' | 'bottom' | 'left' | 'right'): 
   }
 }
 
+/** 矩形四边中点锚点（上/下/左/右，按序返回）：端口提示与磁吸预览用 */
+export function sideAnchors(r: Rect): Vec[] {
+  return [sideAnchor(r, 'top'), sideAnchor(r, 'bottom'), sideAnchor(r, 'left'), sideAnchor(r, 'right')];
+}
+
 /** 根据两矩形相对位置推断默认连接边 */
 export function inferSides(from: Rect, to: Rect): {
   fromSide: 'top' | 'bottom' | 'left' | 'right';
@@ -130,9 +204,16 @@ export function inferSides(from: Rect, to: Rect): {
 export function bezierPath(a: Vec, aSide: string, b: Vec, bSide: string): { path: Vec[]; endTangent: Vec } {
   const na = sideNormal(aSide);
   const nb = sideNormal(bSide);
-  const dist = Math.max(24, Math.hypot(b.x - a.x, b.y - a.y) * 0.4);
-  const c1 = { x: a.x + na.x * dist, y: a.y + na.y * dist };
-  const c2 = { x: b.x + nb.x * dist, y: b.y + nb.y * dist };
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len; // 弦向：曲线总体走向
+  const dist = Math.max(24, len * 0.4);
+  // 控制点 = 出边法向与弦向各半：端部切线跟随弧线走向 —— 斜向连接时箭头头/尾部
+  // 随弧度倾斜，而不是「始终垂直正对元素」；水平/垂直对齐时法向≈弦向，与旧曲线一致。
+  const c1 = { x: a.x + (na.x + ux) * dist * 0.5, y: a.y + (na.y + uy) * dist * 0.5 };
+  const c2 = { x: b.x + (nb.x - ux) * dist * 0.5, y: b.y + (nb.y - uy) * dist * 0.5 };
   return { path: [a, c1, c2, b], endTangent: { x: b.x - c2.x, y: b.y - c2.y } };
 }
 

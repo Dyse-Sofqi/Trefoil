@@ -6,7 +6,7 @@
  * - live()：拖拽过程中的实时修改，不进撤销栈（结束后用 commitPositions 落栈）。
  */
 import { Emitter } from './events';
-import type { CanvasDoc, CanvasEdge, CanvasNode } from './types';
+import type { CanvasDoc, CanvasEdge, CanvasNode, Side } from './types';
 import { uid } from './id';
 import type { Command } from './History';
 import { freezeBoundArrows } from './arrowLink';
@@ -31,11 +31,21 @@ export interface ResizeStartRecord {
   height: number;
   flipX?: boolean;
   flipY?: boolean;
+  /** 旋转角（度，缺省 0）：旋转拖拽的起始角，撤销/重做时一并还原 */
+  rotation?: number;
   /** 线类节点（直线/箭头/折线）的折点快照：端点拖拽/缩放后 bbox 与 points 必须一起回滚 */
   points?: number[][];
   /** 端点磁吸绑定快照：拖绑定端会解除绑定，撤销时需一并还原 */
   fromNode?: string | null;
   toNode?: string | null;
+}
+
+/** 连线（Edge）端点重绑的绑定快照：拖拽调整链接前后各存一份供撤销/重做 */
+export interface EdgeBindingState {
+  fromNode: string;
+  toNode: string;
+  fromSide?: Side;
+  toSide?: Side;
 }
 
 export class Document {
@@ -234,6 +244,7 @@ export class Document {
           height: n.height,
           flipX: n.flipX,
           flipY: n.flipY,
+          rotation: n.rotation,
           points: n.points ? n.points.map((p) => [...p]) : undefined,
           fromNode: n.fromNode,
           toNode: n.toNode,
@@ -255,6 +266,7 @@ export class Document {
               n.height = sz.height;
               if (sz.flipX !== undefined) n.flipX = sz.flipX;
               if (sz.flipY !== undefined) n.flipY = sz.flipY;
+              if (sz.rotation !== undefined) n.rotation = sz.rotation;
               if (sz.points) n.points = sz.points.map((p) => [...p]);
               if (sz.fromNode !== undefined) n.fromNode = sz.fromNode ?? undefined;
               if (sz.toNode !== undefined) n.toNode = sz.toNode ?? undefined;
@@ -272,6 +284,7 @@ export class Document {
             n.height = e.height;
             if (e.flipX !== undefined) n.flipX = e.flipX;
             if (e.flipY !== undefined) n.flipY = e.flipY;
+            if (e.rotation !== undefined) n.rotation = e.rotation;
             if (e.points) n.points = e.points.map((p) => [...p]);
             if (e.fromNode !== undefined) n.fromNode = e.fromNode || undefined;
             if (e.toNode !== undefined) n.toNode = e.toNode || undefined;
@@ -350,6 +363,40 @@ export class Document {
       const e = this.edgeIndex.get(id);
       if (e) Object.assign(e, patch);
     });
+  }
+
+  /**
+   * 连线端点重绑（拖拽调整链接）落盘：start 为拖拽前的绑定快照，当前状态为“后”状态；
+   * 绑定未变化时不产生撤销记录。松手落在空白（恢复原绑定）不应调用本方法。
+   */
+  commitEdgeRelink(edgeId: string, start: EdgeBindingState, label = '调整连线'): void {
+    const doc = this;
+    const e = this.edgeIndex.get(edgeId);
+    if (!e) return;
+    const end: EdgeBindingState = { fromNode: e.fromNode, toNode: e.toNode, fromSide: e.fromSide, toSide: e.toSide };
+    if (
+      start.fromNode === end.fromNode &&
+      start.toNode === end.toNode &&
+      start.fromSide === end.fromSide &&
+      start.toSide === end.toSide
+    ) {
+      return;
+    }
+    this.history?.push({
+      label,
+      undo: () => doc.applyEdgeBinding(edgeId, start),
+      redo: () => doc.applyEdgeBinding(edgeId, end),
+    });
+  }
+
+  private applyEdgeBinding(edgeId: string, st: EdgeBindingState): void {
+    const e = this.edgeIndex.get(edgeId);
+    if (!e) return;
+    e.fromNode = st.fromNode;
+    e.toNode = st.toNode;
+    e.fromSide = st.fromSide;
+    e.toSide = st.toSide;
+    this.events.emit('changed', { live: false });
   }
 
   // ---------- 图层顺序 ----------

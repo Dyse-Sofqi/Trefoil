@@ -3,7 +3,8 @@
   import { ui, settings } from './ui.svelte';
   import { icon } from './icons';
   import type { CanvasNode, HAlign, ArrowHeadStyle, BorderStyle } from '../core/types';
-  import { isLineLike } from '../core/types';
+  import { canRotate, isLineLike } from '../core/types';
+  import { arrangeTargets, fitRingRadius } from '../core/arrange';
   import type { ArrangeAnchor, ArrangeMode, RingDistribute, RingOrderBy } from '../core/arrange';
   import { resolveColor } from '../engine/palette';
   import { FONT_PRESETS, CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from '../core/defaults';
@@ -141,6 +142,14 @@
   const opacityPercent = $derived.by(() => {
     void ui.rev;
     return Math.round((ref?.opacity ?? 1) * 100);
+  });
+
+  /** 可旋转：块状元素（文本/形状/图片）；线类几何由端点决定、容器要装子元素，都不参与旋转 */
+  const rotatable = $derived(sel.length > 0 && sel.every((n) => canRotate(n)));
+  /** 旋转角显示值（度）：派生读取 —— 拖旋转手柄时经 ui.rev 实时刷新到数字框 */
+  const rotationVal = $derived.by(() => {
+    void ui.rev;
+    return Math.round((ref?.rotation ?? 0) * 10) / 10;
   });
 
   function clampSize(v: number): number {
@@ -412,32 +421,22 @@
   }
 
   /**
-   * 首次切到环形模式：半径默认贴合现有位置
-   * （各元素几何中心到所选包围盒中心的最大距离，下限 40），之后保留用户调整值。
+   * 首次切到环形模式：半径默认贴合现有位置（各元素几何中心到所选包围盒中心的最大距离，下限 40），
+   * 之后保留用户调整值。线类节点（箭头/直线）不上环，计算时一并排除。
    */
   function initRingRadius(): void {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const n of sel) {
-      minX = Math.min(minX, n.x);
-      minY = Math.min(minY, n.y);
-      maxX = Math.max(maxX, n.x + n.width);
-      maxY = Math.max(maxY, n.y + n.height);
-    }
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
-    let maxDist = 40;
-    for (const n of sel) {
-      maxDist = Math.max(maxDist, Math.hypot(n.x + n.width / 2 - cx, n.y + n.height / 2 - cy));
-    }
-    arrangeRingRadius = Math.round(maxDist);
+    const items = arrangeTargets(sel);
+    arrangeRingRadius = clampRingRadius(fitRingRadius(items.length ? items : sel));
   }
 
-  /** 应用排列；mode 传入时先切换模式（点模式按钮即立即排列） */
+  /**
+   * 应用排列；mode 传入时先切换模式（点模式按钮即立即排列）。
+   * 半径只在「切入环形模式」时按当前布局拟合一次（首次贴合现有位置），
+   * 之后重复点「环形」沿用当前半径与圆心 —— 若每次点击都重新拟合，会拿刚排好的环形几何
+   * 反推半径，而环心与元素包围盒中心并不重合（元素尺寸不同时必有偏移），半径会被越推越大。
+   */
   function arrange(mode?: ArrangeMode): void {
-    if (mode) {
+    if (mode && mode !== arrangeMode) {
       arrangeMode = mode;
       if (mode === 'ring') initRingRadius();
     }
@@ -465,6 +464,36 @@
       <span>{sel.length > 1 ? `已选 ${sel.length} 项${allText ? '（文本）' : allShapes ? '（形状）' : allFiles ? '（图片）' : ''}` : single?.type === 'text' ? '文本' : single?.type === 'file' ? '图片' : single?.type === 'trefoil/container' ? '容器' : '形状'}</span>
       <button class="trefoil-icon-btn" title="收起" onclick={() => (ui.propsOpen = false)}>{@html icon('chevron-right')}</button>
     </div>
+
+    {#if rotatable}
+      <div class="trefoil-sec">
+        <div class="trefoil-row">
+          <span class="trefoil-lab">旋转</span>
+          <input
+            type="number"
+            min="-180"
+            max="180"
+            step="1"
+            value={rotationVal}
+            use:wheelAdjust={{ kind: 'value' }}
+            oninput={(e) => {
+              const v = +e.currentTarget.value;
+              if (Number.isFinite(v)) app.liveSelectionRotation(v);
+            }}
+            onchange={(e) => app.commitSelectionRotation(+e.currentTarget.value || 0)}
+            onkeydown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
+          />
+          <span class="trefoil-val">{rotationVal}°</span>
+          <button
+            class="trefoil-mini-btn"
+            title="重置为 0°（双击画布上的旋转手柄同样生效）"
+            disabled={rotationVal === 0}
+            onclick={() => app.setSelectionRotation(0, '重置旋转')}>重置</button>
+        </div>
+      </div>
+    {/if}
 
     {#if isText && ref}
       <div class="trefoil-sec">

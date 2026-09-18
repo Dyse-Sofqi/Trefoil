@@ -81,8 +81,7 @@ export class TrefoilView extends ItemView {
     this.adapter = new ObsidianAdapter(this.plugin, file);
     this.adapter.fileName = file.basename;
 
-    const dark = document.body.classList.contains('theme-dark');
-    const initial = trefoilSettingsFromPlugin(this.settings, dark);
+    const initial = trefoilSettingsFromPlugin(this.settings);
     // 画布底色兜底变量由 styles.css 按主题 class 提供，无需写入元素样式
 
     this.svelteApp = mount(App, {

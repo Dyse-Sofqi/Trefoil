@@ -33,26 +33,26 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 
 **中文关键词**
 
-- **绘图** — 精确几何绘图 · 矩形 / 圆形椭圆 / 菱形 / 三角形 / 箭头 / 直线折线 · 像素级精确 · 非手绘风格 · `Shift` 约束正形 · `Alt` 中心展开
+- **绘图** — 精确几何绘图 · 矩形 / 圆形椭圆 / 菱形 / 三角形 / 箭头 / 直线折线 · 像素级精确 · 非手绘风格 · `Shift` 约束正形 · `Alt` 中心展开 · 元素旋转（手柄拖拽 · `Shift` 15° 吸附 · 面板精确角度 · 双击归零）
 - **文本** — 内联 Markdown（加粗 / 斜体 / 代码 / 删除线）· 内置预设与系统字体 · 自定义字体 · 字号 / 字重 / 颜色 / 对齐 · 实体边框（实线 / 虚线 / 点状 / 圆角 / 粗细）· 填充背景 · 宽高贴合内容
 - **容器** — 分组容器 · 整体拖拽 · 内部空白穿透 · 容器名片（随缩放同步屏幕大小）· 背景色与背景透明度 · 圆角 · 组合 / 拆解
-- **线类与连线** — 端点磁吸绑定元素 · 跟随目标移动 · 双端绑定渲染为贝塞尔曲线 · 6 种端点样式（实心箭头 / 空心箭头 / 线段箭头 / 圆点 / 空心圆点 / 无）· 线型（实线 / 虚线 / 点状）· 端点手柄改折点 · 关系描述内联编辑 · 连线选中与删除 · 双向箭头
+- **线类与连线** — 端点磁吸绑定元素 · 跟随目标移动 · 双端绑定渲染为贝塞尔曲线 · 6 种端点样式（实心箭头 / 空心箭头 / 线段箭头 / 圆点 / 空心圆点 / 无）· 线型（实线 / 虚线 / 点状）· 端点手柄改折点与重连 · 磁吸预览（四向端口 + 吸附点高亮）· 关系描述内联编辑 · 连线选中与删除 · 双向箭头
 - **导图** — 升级 / 取消导图主节点 · `Tab` 加子节点 · `Enter` 加同级节点 · 边驱动成员资格 · 继承父节点样式 · S 形分支曲线
 - **排列** — 横向 · 纵向 · 矩阵 · 环形（均分 / 固定角距 · 半径 · 起始角 · 顺逆时针 · 排序依据）· 基准（左上角边缘 / 几何中心）· 实时预览 · 单步撤销
-- **积木式交互** — 智能吸附 · 边缘 / 中心对齐 · 磁吸网格 · 间距参考线 · 绑定组（编队）· 图层排序 · 形状翻转
+- **积木式交互** — 智能吸附 · 边缘 / 中心对齐 · 吸附网格 · 间距参考线 · 绑定组（编队）· 图层排序 · 形状翻转
 - **镭射笔与橡皮擦** — 独立临时图层 · 延迟淡出（1 / 3 / 5 / 10 秒 / 手动）· 永不落盘 · 动态半径（5–200 px）· 擦除可撤销
 - **画布与视图** — 纯色 / 点阵 / 双层级网格 · 日间 / 夜间 / 跟随系统 · 查看模式（正常 / 浏览 / 聚焦）· 主题适配
 - **导出与集成** — PNG（可选透明背景 / 含笔迹）· SVG 矢量导出（含端点样式、曲线、容器背景、图片描述）· 图片粘贴与拖入 · JSON Canvas 1.1 · `.canvas` 原生读写 · 命令面板 · 快捷键 · 错误日志
 
 **English keywords**
 
-- **Drawing** — Precise geometric shapes · Rectangle / Ellipse / Diamond / Triangle / Arrow / Line & Polyline · Pixel-exact, no hand-drawn style · `Shift` to constrain · `Alt` to draw from the centre
+- **Drawing** — Precise geometric shapes · Rectangle / Ellipse / Diamond / Triangle / Arrow / Line & Polyline · Pixel-exact, no hand-drawn style · `Shift` to constrain · `Alt` to draw from the centre · Rotation (handle drag · `Shift` 15° snap · exact angle in panel · double-click to zero)
 - **Text** — Inline Markdown (bold / italic / code / strikethrough) · Built-in presets & system fonts · Custom font family · Size / weight / colour / alignment · Solid, dashed or dotted border with radius and width · Background fill · Size hugs content
 - **Containers** — Grouped containers · Drag the whole group · Click-through interior · Zoom-synced name plate · Background colour & opacity · Corner radius · Compose / decompose
-- **Lines & edges** — Endpoint snapping that binds to another element · Endpoints follow their target · Two bound endpoints render as a Bezier curve · Six endpoint styles (solid / hollow / line arrow, dot, hollow dot, none) · Solid, dashed or dotted stroke · Per-vertex handles · Inline relationship labels · Selectable and deletable edges · Double-headed arrows
+- **Lines & edges** — Endpoint snapping that binds to another element · Endpoints follow their target · Two bound endpoints render as a Bezier curve · Six endpoint styles (solid / hollow / line arrow, dot, hollow dot, none) · Solid, dashed or dotted stroke · Per-vertex handles · Edge re-linking · Magnet preview (four snap ports + highlighted anchor) · Inline relationship labels · Selectable and deletable edges · Double-headed arrows
 - **Mind maps** — Promote / demote a mind-map root · `Tab` for a child node · `Enter` for a sibling · Edge-driven membership · Inherited styling · S-curve branches
 - **Arrange** — Row · Column · Matrix · Ring (even distribution or fixed angle step, radius, start angle, direction, ordering) · Anchor by top-left edges or geometric centre · Live preview · Single undo step
-- **Building-block interaction** — Smart snapping · Edge / centre alignment · Grid magnet · Spacing guides · Binding groups · Layer ordering · Shape flipping
+- **Building-block interaction** — Smart snapping · Edge / centre alignment · Grid snap · Spacing guides · Binding groups · Layer ordering · Shape flipping
 - **Laser & eraser** — Dedicated transient layer · Delayed fade-out (1 / 3 / 5 / 10 s / manual) · Never persisted · Dynamic radius (5–200 px) · Undoable erase
 - **Canvas & views** — Solid / dots / dual-level grid · Day / night / follow system · View modes (normal / browse / focus) · Theme aware
 - **Export & integration** — PNG (optional transparent background / include laser) · Vector SVG export (endpoint styles, curves, container backgrounds, image captions) · Image paste & drop · JSON Canvas 1.1 · Native `.canvas` read/write · Command palette · Hotkeys · Error log
@@ -77,9 +77,13 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 
 - **编辑线与折点** — 单选直线/箭头/折线时不再显示包围盒，只显示端点与顶点手柄，拖拽手柄即可直接改折点；越出原范围时包围盒自动重算，另一端的世界位置保持不动。
 
-- **属性面板** — 选中元素后在右侧统一调整坐标/尺寸、填充、描边颜色与粗细、透明度、文本样式、圆角、翻转、端点样式与线型等；数值控件支持鼠标悬停滚轮微调（步进方式可配置：自动 / 固定数值 / 百分比）。
+- **属性面板** — 选中元素后在右侧统一调整坐标/尺寸、填充、描边颜色与粗细、透明度、文本样式、圆角、旋转、翻转、端点样式与线型等；数值控件支持鼠标悬停滚轮微调（步进方式可配置：自动 / 固定数值 / 百分比）。
+
+- **元素旋转** — 单选文本 / 形状 / 图片时顶部出现旋转手柄，绕自身中心拖拽旋转（按住 `Shift` 吸附 15°，双击手柄归零）；属性面板「旋转」区块支持输入精确角度、实时预览与一键重置。旋转角写入 `trefoil:rotation`，0° 不落盘，撤销 / 重做一并还原。
 
 - **连线与关系描述** — 形状之间可建立连线关系，连线端点吸附在节点的上/下/左/右侧（`fromSide` / `toSide`）。连线可单击选中并高亮，`Delete` 即可删除；双击连线或线类形状的线段，可在中点就地输入关系描述，右键菜单同样提供「编辑 / 清除关系描述」与「删除连线」。
+
+- **连线端点重连与磁吸预览** — 单选连线后拖动两端的圆形手柄，可在四向磁吸下重新绑定到其它元素并实时跟随，拖到空白恢复原连接，全程可撤销；拖箭头 / 直线端点靠近元素会自动磁吸绑定该端。拖端点或画箭头时，贴近元素会显示四向端口并高亮实际吸附锚点，提示范围与真实磁吸范围一致。
 
 ---
 
@@ -88,6 +92,8 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 容器是贴在白板上的智能积木块：外观上是一块可整体拖拽的区域，把相关元素收纳为一组，让画布上散落的想法聚合成结构。
 
 - **容器操作（右键菜单 / 属性面板）** — 重命名容器、拆解容器；多选自由元素可一键「组合为容器」。
+
+- **拖动语义** — 单击容器边带只选中其内容（便于排列等批量操作）；只有从边带发起拖拽，容器框才随内容整体移动（嵌套容器逐层跟随）；全选内容后从元素发起拖动，容器框保持原位。
 
 - **背景与圆角（属性面板）** — 容器可设背景色（取色器 / 6 个预设色 / 无）并单独调背景透明度，圆角 0–160px；背景绘制在容器内容**之下**，不会盖住容器里的节点。两者都有默认值（圆角 10、背景透明度 10%），只有显式调过才写进 `.canvas`。
 
@@ -115,7 +121,7 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 
 #### 🧲 积木式交互
 
-- **智能吸附** — 移动/缩放时自动吸附到其他元素的边缘与中心，显示对齐参考线；可选磁吸网格（按背景网格吸附），并在对齐元素之间显示间距数值参考线。
+- **智能吸附** — 移动/缩放时自动吸附到其他元素的边缘与中心，显示对齐参考线；可选吸附网格（左/上边缘直接贴格线），并在对齐元素之间显示间距数值参考线。
 
 - **绑定组（编队）** — 把多个元素绑定为一个整体一起移动、缩放；组可嵌套，属性面板与右键菜单提供「绑定组 / 解绑组」。
 
@@ -151,7 +157,7 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 
 - **画布背景** — 纯色 / 点阵 / 双层级网格三种模式：点阵可调大小（1–10 px）、形状（圆形/方形/菱形）、颜色、间距；网格为双层结构，小格淡、大格浓，大格合并格数（N 格小网格 = 1 格大网格）可调。
 
-- **主题模式** — 日间 / 夜间 / 跟随系统三态，状态栏一键循环切换。夜间模式有独立的画布底色、点阵色与网格色；主题翻转时，仍沿用默认色的节点文字与描边会自动跟随切换（画布同样监听 Obsidian 的 `css-change` 事件重新着色）。
+- **主题模式** — 日间 / 夜间 / 跟随系统三态，状态栏一键循环切换。夜间模式有独立的画布底色、点阵色与网格色（分别存于 `colorDark` 等字段）；主题翻转时，仍沿用默认色的节点文字与描边会自动跟随切换，画布监听主题变更并延迟到下一帧统一重绘，深浅切换即时生效。
 
 - **查看模式** — 正常（可编辑）/ 浏览（只读平移缩放，适合演示）/ 聚焦（选中元素居中放大并加遮罩）。
 
@@ -208,7 +214,7 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 设置面板位于**白板内部**（画布中的设置入口），仅影响视觉与交互辅助，**不写入 `.canvas` 数据文件**：
 
 - **背景** — 模式（纯色 / 点阵 / 网格）、底色、点阵大小与形状与颜色与间距、网格间距与颜色、小格浓度、大格浓度、大格合并格数
-- **吸附** — 启用吸附、磁吸网格、吸附对象、吸附阈值、参考线阈值
+- **吸附** — 启用吸附、吸附网格、对象吸附、对象阈值、参考线阈值
 - **镭射笔** — 颜色、粗细、消失延迟（1 / 3 / 5 / 10 秒、手动清除）
 - **橡皮擦** — 半径（5–200 px）
 - **文本默认** — 字体、字号、字重、颜色
@@ -225,7 +231,7 @@ Trefoil 是一款 Obsidian 白板插件，把「白板」当成思考的工作�
 - 标准字段原样保留：`id` / `x` / `y` / `width` / `height` / `type` / `text` / `color` / `fromSide` / `toSide` / `label`；
 - Trefoil 扩展字段使用 `trefoil:` 命名空间，如 `trefoil:shape`、`trefoil:containerId`；
 - 容器子节点在文件中以**相对坐标**存储，内存中统一为绝对坐标；
-- 其他扩展字段：`trefoil:points`（折线折点）、`trefoil:headStyle` / `trefoil:tailStyle`（端点样式）、`trefoil:strokeStyle`（线型）、`trefoil:fromNode` / `trefoil:toNode`（端点绑定）、`trefoil:label`（线类形状的关系描述）、`trefoil:caption`（图片描述）、`trefoil:mapRoot`（导图主节点）、`trefoil:kind`（连线类型，如 `mindmap`）、`trefoil:fillOpacity` / `trefoil:borderRadius` / `trefoil:border` / `trefoil:borderStyle`；
+- 其他扩展字段：`trefoil:points`（折线折点）、`trefoil:headStyle` / `trefoil:tailStyle`（端点样式）、`trefoil:strokeStyle`（线型）、`trefoil:fromNode` / `trefoil:toNode`（端点绑定）、`trefoil:label`（线类形状的关系描述）、`trefoil:caption`（图片描述）、`trefoil:mapRoot`（导图主节点）、`trefoil:kind`（连线类型，如 `mindmap`）、`trefoil:rotation`（旋转角，0° 不落盘）、`trefoil:fillOpacity` / `trefoil:borderRadius` / `trefoil:border` / `trefoil:borderStyle`；
 - 未知节点类型与字段按规范原样保留；**镭射笔迹永不写入文件**。
 
 ### 安装
@@ -328,8 +334,10 @@ Structure can also be expressed through **relationships** rather than nesting: a
 - **Endpoint snapping** — while drawing an arrow or line, an endpoint that comes near another element's edge snaps to it and binds to that element; the endpoint then follows its target. When both endpoints are bound, the whole line renders as a smooth Bezier curve. If a bound element is deleted, the line does not disappear with it — it freezes in place as a plain line.
 - **Endpoint styles & line styles** — the end and the start of a line each offer six styles: none, solid arrow, hollow arrow, line (V) arrow, dot, hollow dot. Setting the start to an arrow or dot gives a double-headed arrow. Stroke style can be solid, dashed or dotted. Endpoint size scales with stroke width, and the shaft is trimmed so a round line cap never pokes through the arrow tip.
 - **Editing lines and vertices** — selecting a single line, arrow or polyline shows endpoint and vertex handles instead of a bounding box; dragging a handle reshapes the line directly. If it grows past its original bounds the bounding box is recomputed while the opposite end keeps its world position.
-- **Property panel** — one place to adjust position/size, fill, stroke color and width, opacity, text style, corner radius, flipping, endpoint styles and stroke style. Numeric controls support wheel fine-tuning while hovering (step mode: auto / fixed value / percentage).
+- **Property panel** — one place to adjust position/size, fill, stroke color and width, opacity, text style, corner radius, rotation, flipping, endpoint styles and stroke style. Numeric controls support wheel fine-tuning while hovering (step mode: auto / fixed value / percentage).
+- **Rotation** — a handle appears above a selected text / shape / image; drag it to rotate around the element's centre (`Shift` snaps to 15°, double-click zeroes it), or type an exact angle with live preview and a reset button in the property panel. The angle is persisted as `trefoil:rotation` (0° omitted) and is fully undoable.
 - **Edges & relationship labels** — link shapes to each other; endpoints snap to the top/bottom/left/right sides of nodes (`fromSide` / `toSide`). An edge can be clicked to select and highlight it, and `Delete` removes it. Double-clicking an edge or a line-like segment opens an inline label editor at its midpoint, and the context menu offers the same edit, clear and delete actions.
+- **Re-linking & magnet preview** — select an edge and drag the circular handles at its ends to re-bind it to another element with four-direction magnet snapping and live follow-through; drop on empty space to restore the original connection — all undoable. Dragging a free arrow / line endpoint near an element snap-binds it too. While dragging an endpoint or drawing an arrow, hovering near a connectable element shows its four snap ports and highlights the anchor that will actually be captured, matching the real magnet radius.
 
 ---
 
@@ -338,6 +346,7 @@ Structure can also be expressed through **relationships** rather than nesting: a
 A container is a smart block on the board: a draggable region that gathers scattered ideas into one group, turning a loose canvas into structure.
 
 - **Container actions** (context menu / property panel) — rename container, decompose container; compose a multi-selection into a container in one action.
+- **Drag semantics** — clicking the edge band selects the container's contents only (handy for batch operations); the frame moves together with its contents only when you drag from the band itself (nested containers follow layer by layer). Dragging an element never drags the frame, even when every child is selected.
 - **Background & radius** (property panel) — a container can take a background colour (picker / six presets / none) with its own opacity, plus a 0–160 px corner radius. The background is painted **beneath** the container's contents and never covers the nodes inside it. Both have defaults (radius 10, background opacity 10%) and are only written to the `.canvas` file once you change them explicitly.
 - **Name plate** — the plate at the container's top-left keeps a comfortable on-screen size in sync with canvas zoom. It has no border; its background is a darkened shade of the canvas color, blending into the board. Double-click it to rename.
 - **Click-through** — containers paint no background, so clicking empty space inside one passes through to the canvas below instead of selecting the container.
@@ -358,7 +367,7 @@ A mind map is not a new kind of element — it is **hierarchy expressed through 
 
 #### 🧲 Building-block Interaction
 
-- **Smart snapping** — while moving/resizing, elements snap to other elements' edges and centers with alignment guides; optional grid magnet, plus live spacing readouts between aligned elements.
+- **Smart snapping** — while moving/resizing, elements snap to other elements' edges and centers with alignment guides; optional grid snap (left/top edge locks to grid lines), plus live spacing readouts between aligned elements.
 - **Binding groups** — bind multiple elements into one unit that moves and scales together; groups can nest. Available from the property panel and context menu (bind / unbind).
 - **Compose / decompose containers** — turn a multi-selection into a container in one action, or decompose a container back into free elements with absolute coordinates restored.
 - **Layer order** — context menu → Layer order: bring to front, send to back, bring forward, send backward (array order is Z-index).
@@ -390,7 +399,7 @@ With 2 or more elements selected, the property panel shows an **Arrange** sectio
 - **Background** — solid / dots / dual-level grid. Dots support size (1–10 px), shape (circle/square/diamond), color and spacing; the grid is two-level — minor lines faint, major lines strong — with a configurable merge count (N minor cells = 1 major cell).
 - **View modes** — Normal (editable) / Browse (read-only pan & zoom, ideal for presentations) / Focus (center and magnify the selection behind a mask).
 - **Navigation** — wheel zooms around the pointer; right-drag or middle-drag pans; hold `Space` for temporary pan mode; "Zoom to fit" is available from the command palette.
-- **Theme mode** — day / night / follow system, cycled from the status bar. Night mode has its own canvas, dot and grid colours. When the theme flips, node text and strokes that still use the default colours follow automatically, and the canvas also listens to Obsidian's `css-change` event to recolour itself.
+- **Theme mode** — day / night / follow system, cycled from the status bar. Night mode has its own canvas, dot and grid colours (stored in `colorDark` etc.). When the theme flips, node text and strokes that still use the default colours follow automatically, and the canvas watches theme changes and recolours on the next frame, so light/dark switches take effect immediately.
 
 ---
 
@@ -443,7 +452,7 @@ Both are reachable from the command palette and the context menu.
 Settings live **inside the whiteboard**. They only affect visuals and interaction aids and are **never written into the `.canvas` file**:
 
 - **Background** — mode (solid / dots / grid), base color, dot size/shape/color/spacing, grid spacing/color, minor opacity, major opacity, merge count
-- **Snapping** — enable snapping, grid magnet, object snapping, snap threshold, guide threshold
+- **Snapping** — enable snapping, grid snap, object snap, object threshold, guide threshold
 - **Laser** — color, width, fade delay (1 / 3 / 5 / 10 s, manual clear)
 - **Eraser** — radius (5–200 px)
 - **Text defaults** — font, size, weight, color
@@ -460,7 +469,7 @@ Files are standard `.canvas` ([JSON Canvas 1.1](https://jsoncanvas.org)):
 - Standard fields are preserved verbatim: `id` / `x` / `y` / `width` / `height` / `type` / `text` / `color` / `fromSide` / `toSide` / `label`;
 - Trefoil extensions use the `trefoil:` namespace, e.g. `trefoil:shape`, `trefoil:containerId`;
 - Container children are stored with **relative coordinates** on disk and normalized to absolute coordinates in memory;
-- Other extension fields: `trefoil:points` (polyline vertices), `trefoil:headStyle` / `trefoil:tailStyle` (endpoint styles), `trefoil:strokeStyle` (line style), `trefoil:fromNode` / `trefoil:toNode` (endpoint bindings), `trefoil:label` (relationship label on a line-like shape), `trefoil:caption` (image caption), `trefoil:mapRoot` (mind-map root), `trefoil:kind` (edge kind, e.g. `mindmap`), `trefoil:fillOpacity` / `trefoil:borderRadius` / `trefoil:border` / `trefoil:borderStyle`;
+- Other extension fields: `trefoil:points` (polyline vertices), `trefoil:headStyle` / `trefoil:tailStyle` (endpoint styles), `trefoil:strokeStyle` (line style), `trefoil:fromNode` / `trefoil:toNode` (endpoint bindings), `trefoil:label` (relationship label on a line-like shape), `trefoil:caption` (image caption), `trefoil:mapRoot` (mind-map root), `trefoil:kind` (edge kind, e.g. `mindmap`), `trefoil:rotation` (rotation angle, omitted at 0°), `trefoil:fillOpacity` / `trefoil:borderRadius` / `trefoil:border` / `trefoil:borderStyle`;
 - Unknown node types and fields are preserved per the spec; **laser strokes are never written to disk**.
 
 ### Installation

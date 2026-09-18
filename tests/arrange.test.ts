@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { computeArrange, type ArrangeBox, type ArrangeParams, type ArrangePositions } from '../src/core/arrange';
+import {
+  arrangeTargets,
+  computeArrange,
+  fitRingRadius,
+  onRing,
+  resolveRingCenter,
+  type ArrangeBox,
+  type ArrangeParams,
+  type ArrangePositions,
+} from '../src/core/arrange';
 
 function boxes(list: [string, number, number, number, number][]): ArrangeBox[] {
   return list.map(([id, x, y, width, height]) => ({ id, x, y, width, height }));
@@ -252,6 +261,95 @@ describe('环形排列', () => {
     expect(out.get('left')!.y + 10).toBeCloseTo(-90);
     expect(out.get('right')!.x + 10).toBeCloseTo(110);
     expect(out.get('right')!.y + 10).toBeCloseTo(110);
+  });
+});
+
+describe('arrangeTargets 独立排位筛选', () => {
+  const node = (id: string, type: string, extra: Record<string, unknown> = {}) => ({ id, type, ...extra });
+
+  it('线类节点（箭头/直线/折线）不占排位', () => {
+    const list = [
+      node('a', 'text'),
+      node('arr', 'trefoil/shape', { shape: 'arrow' }),
+      node('l', 'trefoil/shape', { shape: 'line' }),
+      node('p', 'trefoil/shape', { shape: 'polyline' }),
+      node('r', 'trefoil/shape', { shape: 'rect' }),
+      node('c', 'trefoil/container'),
+    ];
+    expect(arrangeTargets(list).map((n) => n.id)).toEqual(['a', 'r', 'c']);
+  });
+
+  it('容器与子节点同选：子节点跟随容器，不独立占位', () => {
+    const list = [
+      node('c', 'trefoil/container'),
+      node('child', 'text', { containerId: 'c' }),
+      node('free', 'text'),
+      node('nested', 'text', { containerId: 'other' }),
+    ];
+    expect(arrangeTargets(list).map((n) => n.id)).toEqual(['c', 'free', 'nested']);
+  });
+
+  it('未同选的容器子节点仍是独立元素', () => {
+    const list = [node('child', 'text', { containerId: 'c' }), node('a', 'text')];
+    expect(arrangeTargets(list).map((n) => n.id)).toEqual(['child', 'a']);
+  });
+});
+
+describe('环形圆心沿用与半径拟合（重复点「环形」不再放大半径）', () => {
+  const box = (id: string, x: number, y: number, width = 20, height = 20): ArrangeBox => ({ id, x, y, width, height });
+  const C = { x: 100, y: 100 };
+  // 尺寸不对称但中心都在半径 50 的环上：中心 (100,50) 与 (100,150)
+  const asym = [box('a', 80, 30, 40, 40), box('b', 95, 145, 10, 10)];
+  const asymCenter = { x: 100, y: 92.5 }; // 矩形包围盒中心（80..120 × 30..155）≠ 环心
+
+  it('onRing：中心距圆心 ≈ 半径 → true；元素离开环 / 空集 → false', () => {
+    expect(onRing(asym, C, 50)).toBe(true);
+    expect(onRing(asym, C, 50.5)).toBe(true); // 容差内（半径取整）
+    expect(onRing(asym, C, 60)).toBe(false);
+    expect(onRing([...asym, box('c', 500, 500)], C, 50)).toBe(false);
+    expect(onRing([], C, 50)).toBe(false);
+  });
+
+  it('resolveRingCenter：同批元素仍在原环上 → 沿用旧圆心（尺寸不对称也不漂移）', () => {
+    expect(resolveRingCenter(asym, { radius: 50, prevCenter: C, sameSet: true })).toEqual(C);
+  });
+
+  it('resolveRingCenter：元素离开环 / 换了元素 → 按当前包围盒中心重新拟合', () => {
+    expect(resolveRingCenter(asym, { radius: 500, prevCenter: C, sameSet: true })).toEqual(asymCenter);
+    expect(resolveRingCenter(asym, { radius: 50, prevCenter: C, sameSet: false })).toEqual(asymCenter);
+    expect(resolveRingCenter([], { radius: 50, prevCenter: C, sameSet: true })).toEqual(C);
+  });
+
+  it('fitRingRadius：取元素中心到包围盒中心的最大距离，下限 40', () => {
+    // 中心 (50,50) 与 (350,50)：包围盒中心 (200,50) → 最大距离 150
+    expect(fitRingRadius([box('a', 0, 0, 100, 100), box('b', 300, 0, 100, 100)])).toBe(150);
+    expect(fitRingRadius([box('a', 0, 0, 10, 10)])).toBe(40);
+    expect(fitRingRadius([])).toBe(40);
+  });
+
+  it('回归：连续点「环形」时半径与位置逐次保持不变', () => {
+    // 尺寸差异明显的初始布局（大卡片 + 两个小节点）—— 旧实现每次点击都按刚排好的环重算半径，
+    // 半径从 398 一路涨到 1399（实测每点一次 +120 左右）
+    const initial = [box('big', 0, 0, 400, 100), box('s', 600, 300, 44, 34), box('t', 700, 380, 44, 34)];
+    const ringParams = (center: { x: number; y: number }, radius: number): ArrangeParams =>
+      params({ mode: 'ring', ring: { radius, distribute: 'even', angleStep: 30, startAngle: 0, clockwise: true, orderBy: 'angle', center } });
+
+    // 模拟面板 + CanvasApp 的配合：半径只在「切入环形模式」拟合一次，圆心由 resolveRingCenter 决定
+    let boxes = initial;
+    let center = resolveRingCenter(boxes, { radius: 0, prevCenter: null, sameSet: false });
+    let radius = fitRingRadius(boxes);
+    const positionsOf = () => computeArrange(boxes, ringParams(center!, radius));
+    const snapshots: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const positions = positionsOf();
+      boxes = boxes.map((b) => ({ ...b, ...positions.get(b.id)! }));
+      const sig = boxes.map((b) => b.id).sort().join(',');
+      const next = resolveRingCenter(boxes, { radius, prevCenter: center, sameSet: sig === 'big,s,t' });
+      expect(next).toEqual(center); // 圆心不漂移
+      expect(radius).toBe(fitRingRadius(initial)); // 半径不再重算
+      snapshots.push(boxes.map((b) => `${b.id}:${Math.round(b.x)},${Math.round(b.y)}`).join('|'));
+    }
+    expect(new Set(snapshots).size).toBe(1); // 每次点击后的位置完全一致（幂等）
   });
 });
 

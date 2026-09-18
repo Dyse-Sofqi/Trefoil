@@ -279,6 +279,7 @@ export class ToolManager {
       // 鼠标离开画布：清理悬停视觉
       this.ctx.engine.overlayState.eraserCursor = null;
       this.ctx.engine.overlayState.ports = [];
+      this.ctx.engine.overlayState.magnet = null;
       this.ctx.engine.applyOverlay();
     };
 

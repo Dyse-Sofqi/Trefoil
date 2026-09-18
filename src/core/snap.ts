@@ -1,6 +1,6 @@
 /**
- * 吸附系统：磁吸网格 + 吸附至对象（边缘/中心）+ 智能参考线（对齐虚线 + 间距数值）。
- * 阈值单位为屏幕像素，内部换算为世界坐标。
+ * 吸附系统：网格吸附（边缘贴格）+ 吸附至对象（边缘/中心）+ 智能参考线（对齐虚线 + 间距数值）。
+ * 阈值单位为屏幕像素，内部换算为世界坐标，只作用于对象吸附。
  */
 import type { Rect } from './geometry';
 import { rectCenter } from './geometry';
@@ -86,16 +86,12 @@ export function snapMove(
     }
   }
 
-  // 磁吸网格（在没有对象吸附命中时兜底）
+  // 网格吸附：左/上边缘取整到最近格线，对象吸附未命中的轴才兜底。
+  // 不做阈值判定——网格是可见线条，边缘允许停在"差几像素没贴上"的位置比直接落格更别扭；
+  // 需要自由微调时用方向键或按住 Alt 拖动。
   if (settings.gridSnap && gridSpacing > 0) {
-    if (!bestX) {
-      const g = Math.round((moving.x + moving.width / 2) / gridSpacing) * gridSpacing - (moving.x + moving.width / 2);
-      if (Math.abs(g) <= threshold) bestX = { delta: g, guide: null };
-    }
-    if (!bestY) {
-      const g = Math.round((moving.y + moving.height / 2) / gridSpacing) * gridSpacing - (moving.y + moving.height / 2);
-      if (Math.abs(g) <= threshold) bestY = { delta: g, guide: null };
-    }
+    if (!bestX) bestX = { delta: quantize(moving.x, gridSpacing) - moving.x, guide: null };
+    if (!bestY) bestY = { delta: quantize(moving.y, gridSpacing) - moving.y, guide: null };
   }
 
   const dx = bestX?.delta ?? 0;
@@ -147,6 +143,11 @@ function appendDistanceGuides(guides: Guide[], moving: Rect, others: Rect[], dx:
     guides.push({ axis: 'v', pos: cx, from: topGap.from, to: topGap.to, label: `${Math.round(Math.abs(topGap.gap))}` });
   if (bottomGap && Math.abs(bottomGap.gap) < 600)
     guides.push({ axis: 'v', pos: cx, from: bottomGap.from, to: bottomGap.to, label: `${Math.round(Math.abs(bottomGap.gap))}` });
+}
+
+/** 取整到最近的格线 */
+function quantize(value: number, spacing: number): number {
+  return Math.round(value / spacing) * spacing;
 }
 
 function xCandidates(r: Rect): AxisCandidate[] {

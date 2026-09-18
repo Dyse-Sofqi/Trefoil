@@ -2,13 +2,22 @@
  * 线类节点（直线/箭头）的端点绑定：fromNode / toNode 指向被磁吸连接的元素 id。
  * - 绑定端随元素移动（每次渲染前 syncBoundArrow 把锚点写回折点与包围盒）；
  * - 双端绑定 → 渲染为三次贝塞尔曲线（arrowCurve，与拓扑连线同款曲线美学）；
+ *   锚点选边与渲染同源（inferSides），包围盒覆盖曲线控制点 —— 折点/选中框与实体不分离；
  * - 被连接元素删除 → 端点冻结为直线（freezeBoundArrows）。
  * 只支持两点线（绑定仅在创建时的两点箭头/直线上产生，折线不参与）。
  */
-import { bezierPath, inferSides, nodeRect, sideAnchor, type Rect, type Vec } from './geometry';
+import { bezierPath, inferSides, nodeRect, segmentIntersectsRect, sideAnchor, type Rect, type Vec } from './geometry';
 import type { CanvasNode } from './types';
 
 type NodeGetter = (id: string) => CanvasNode | undefined;
+
+/** 端点磁吸半径（屏幕 px）：落点在此距离内即吸附到元素边缘锚点并建立绑定 */
+export const MAGNET_PX = 14;
+
+/** 可作为端点磁吸/重绑目标的元素：线类形状（直线/箭头/折线）不参与绑定 */
+export function isLinkableTarget(n: CanvasNode): boolean {
+  return !(n.type === 'trefoil/shape' && (n.shape === 'line' || n.shape === 'arrow' || n.shape === 'polyline'));
+}
 
 /** 两点线的世界坐标端点（不感知翻转；绑定与端点拖拽路径都已在无翻转状态下工作） */
 function twoPointWorld(n: CanvasNode): [Vec, Vec] {
@@ -20,7 +29,7 @@ function twoPointWorld(n: CanvasNode): [Vec, Vec] {
 }
 
 /** 绑定端的锚点：取目标矩形上朝向另一端最近的边中点（端点随位置自动绕到最近的边） */
-function anchorToward(target: CanvasNode, toward: Vec): Vec {
+export function anchorToward(target: CanvasNode, toward: Vec): Vec {
   const r = nodeRect(target);
   const dl = Math.abs(toward.x - r.x);
   const dr = Math.abs(toward.x - (r.x + r.width));
@@ -32,21 +41,25 @@ function anchorToward(target: CanvasNode, toward: Vec): Vec {
 }
 
 /**
- * 箭头的有效端点：绑定端取目标元素锚点（动态选边），自由端取折点。
- * 绑定指向的元素不存在时按自由端处理（自愈）。
+ * 箭头的有效端点：绑定端取目标元素锚点，自由端取折点。
+ * 双端绑定 → 与渲染端 arrowCurve 完全同源（inferSides 选边）：折点、包围盒、选中框
+ * 必须与画出来的曲线严丝合缝，否则「实体和边框不在同一位置」。
+ * 单端绑定 → 绑定端朝向自由端取最近边；绑定目标不存在时按自由端处理（自愈）。
  */
 export function effectiveEndpoints(n: CanvasNode, get: NodeGetter): { a: Vec; b: Vec } {
   const [p0, p1] = twoPointWorld(n);
+  const f = n.fromNode ? get(n.fromNode) : undefined;
+  const t = n.toNode ? get(n.toNode) : undefined;
+  if (f && t) {
+    const fr = nodeRect(f);
+    const tr = nodeRect(t);
+    const sides = inferSides(fr, tr);
+    return { a: sideAnchor(fr, sides.fromSide), b: sideAnchor(tr, sides.toSide) };
+  }
   let a = p0;
   let b = p1;
-  if (n.fromNode) {
-    const t = get(n.fromNode);
-    if (t) a = anchorToward(t, p1);
-  }
-  if (n.toNode) {
-    const t = get(n.toNode);
-    if (t) b = anchorToward(t, p0);
-  }
+  if (f) a = anchorToward(f, p1);
+  if (t) b = anchorToward(t, p0);
   return { a, b };
 }
 
@@ -93,40 +106,99 @@ export function syncBoundArrow(n: CanvasNode, get: NodeGetter): void {
   if (n.toNode && !get(n.toNode)) n.toNode = undefined;
   if (!n.fromNode && !n.toNode) return;
   const { a, b } = effectiveEndpoints(n, get);
-  const minX = Math.min(a.x, b.x);
-  const minY = Math.min(a.y, b.y);
+  // 双端绑定的贝塞尔会拱出弦包围盒：包围盒必须覆盖控制点（凸包性），
+  // 否则多选选中框 / 框选范围只贴着两端锚点的连线，与画出来的弧线错位。
+  const curve = arrowCurve(n, get);
+  applyBoundBox(n, a, b, curve?.path ?? null);
+}
+
+/**
+ * 把包围盒写回节点：范围取两端点 ∪ 曲线控制点（凸包性质保证包住整条弧线）。
+ * points 记录两端点相对新原点的位置，端点世界坐标保持不变。
+ */
+function applyBoundBox(n: CanvasNode, a: Vec, b: Vec, path: number[] | null): void {
+  let minX = Math.min(a.x, b.x);
+  let minY = Math.min(a.y, b.y);
+  let maxX = Math.max(a.x, b.x);
+  let maxY = Math.max(a.y, b.y);
+  if (path) {
+    for (let i = 0; i + 1 < path.length; i += 2) {
+      minX = Math.min(minX, path[i]!);
+      maxX = Math.max(maxX, path[i]!);
+      minY = Math.min(minY, path[i + 1]!);
+      maxY = Math.max(maxY, path[i + 1]!);
+    }
+  }
   n.x = minX;
   n.y = minY;
-  n.width = Math.max(1, Math.abs(a.x - b.x));
-  n.height = Math.max(1, Math.abs(a.y - b.y));
+  n.width = Math.max(1, maxX - minX);
+  n.height = Math.max(1, maxY - minY);
   n.points = [
     [a.x - minX, a.y - minY],
     [b.x - minX, b.y - minY],
   ];
 }
 
+/** 把绑定端锚点固化为直线折点并重排包围盒；绑定字段的保留/清除由调用方决定 */
+export function bakeBoundArrowEndpoints(n: CanvasNode, get: NodeGetter): void {
+  const { a, b } = effectiveEndpoints(n, get);
+  applyBoundBox(n, a, b, null);
+}
+
 /**
- * 元素删除时冻结指向它的绑定：把当前锚点固化为直线折点并清除绑定字段，
- * 箭头变成一根停在原位的普通直线（不会跟着消失，也不会指向悬空 id）。
+ * 整体冻结一条绑定箭头：锚点固化为折点并清除全部绑定（用于“拖动绑定箭头本体”时
+ * 解除磁吸，否则渲染循环的 syncBoundArrow 会把它吸回元素上，表现为拖不动）。
+ */
+export function freezeBoundArrow(n: CanvasNode, get: NodeGetter): void {
+  bakeBoundArrowEndpoints(n, get);
+  n.fromNode = undefined;
+  n.toNode = undefined;
+}
+
+/**
+ * 元素删除时冻结所有指向被删元素的绑定箭头：只清除被删一侧的绑定，
+ * 另一侧若仍绑定则保留（箭头变直线但仍跟随幸存元素）。
  */
 export function freezeBoundArrows(candidates: CanvasNode[], get: NodeGetter, removed: Set<string>): void {
   for (const n of candidates) {
     if (!(n.fromNode || n.toNode)) continue;
     if (!(n.fromNode && removed.has(n.fromNode)) && !(n.toNode && removed.has(n.toNode))) continue;
-    const { a, b } = effectiveEndpoints(n, get);
-    const minX = Math.min(a.x, b.x);
-    const minY = Math.min(a.y, b.y);
-    n.x = minX;
-    n.y = minY;
-    n.width = Math.max(1, Math.abs(a.x - b.x));
-    n.height = Math.max(1, Math.abs(a.y - b.y));
-    n.points = [
-      [a.x - minX, a.y - minY],
-      [b.x - minX, b.y - minY],
-    ];
+    bakeBoundArrowEndpoints(n, get);
     if (n.fromNode && removed.has(n.fromNode)) n.fromNode = undefined;
     if (n.toNode && removed.has(n.toNode)) n.toNode = undefined;
   }
+}
+
+/**
+ * 线类节点的世界坐标折线（= 渲染出来的实体）：
+ * - 双端绑定 → 贝塞尔曲线采样（命中/框选都必须按拱起的弧线，而不是弦）；
+ * - 直线/箭头/折线 → 折点（过翻转镜像：视觉线是翻转后的那条）。
+ * 点选容差与框选判定都以它为唯一几何来源，避免"选中的范围"和"看到的线"对不上。
+ */
+export function linePolyline(n: CanvasNode, get?: NodeGetter, steps = 24): Vec[] {
+  if (get && n.fromNode && n.toNode) {
+    const curve = arrowCurve(n, get);
+    if (curve) {
+      const s = sampleCubic(curve.path, steps);
+      const pts: Vec[] = [];
+      for (let i = 0; i + 1 < s.length; i += 2) pts.push({ x: s[i]!, y: s[i + 1]! });
+      return pts;
+    }
+  }
+  const raw = n.points && n.points.length >= 2 ? n.points : [[0, 0], [n.width, n.height]];
+  return raw.map(([px, py]) => ({
+    x: n.x + (n.flipX ? n.width - px : px),
+    y: n.y + (n.flipY ? n.height - py : py),
+  }));
+}
+
+/** 线类节点是否落在框选矩形内：按实体折线判定，斜线的包围盒留白不算（否则会凭空选中） */
+export function lineHitsRect(n: CanvasNode, r: Rect, get?: NodeGetter): boolean {
+  const path = linePolyline(n, get);
+  for (let i = 0; i < path.length - 1; i++) {
+    if (segmentIntersectsRect(path[i]!, path[i + 1]!, r)) return true;
+  }
+  return false;
 }
 
 /** 三次贝塞尔采样（t 均匀）：命中测试用折线近似曲线 */
@@ -145,20 +217,20 @@ export function sampleCubic(path: number[], steps = 12): number[] {
   return out;
 }
 
-/** 创建时端点磁吸：在 (wx,wy) 半径 r 内找最近的候选元素，返回其锚点与 id */
+/** 创建/重绑时端点磁吸：在 (wx,wy) 半径 r 内找最近的候选元素，返回其锚点与 id（四向最近边） */
 export function magnetAnchor(
   wx: number,
   wy: number,
   r: number,
   candidates: CanvasNode[],
   visible: (id: string) => boolean,
-  exclude?: string | null,
+  exclude?: string | Iterable<string> | null,
 ): { id: string; x: number; y: number } | null {
+  const excluded = exclude == null ? null : new Set(typeof exclude === 'string' ? [exclude] : exclude);
   let best: { id: string; x: number; y: number } | null = null;
   let bestD = r;
   for (const t of candidates) {
-    if (t.id === exclude || !visible(t.id)) continue;
-    if (t.type === 'trefoil/shape' && (t.shape === 'line' || t.shape === 'arrow' || t.shape === 'polyline')) continue;
+    if (excluded?.has(t.id) || !visible(t.id) || !isLinkableTarget(t)) continue;
     const rect: Rect = { x: t.x, y: t.y, width: t.width, height: t.height };
     const a = anchorToward(t, { x: wx, y: wy });
     const d = Math.hypot(a.x - wx, a.y - wy);
@@ -207,45 +279,47 @@ function cubicLength(path: number[], steps = 24): number {
 }
 
 /**
- * 三次贝塞尔末端回缩：截掉终点处约 dist 长度的一段（曲线形状不变），
+ * 按弧长求参数 t：fromEnd = true 时从终点往回量 dist，否则从起点往前量。
+ * 采样密度跟随曲线长度（约 2px 一段，32..512 段）并在段内线性插值 ——
+ * 固定份数的粗采样（旧实现 48 份）在长曲线上一次就跳过一整段，
+ * 十几像素的端点回缩会被整段忽略，线杆圆帽于是留在箭头尖上（观感：线杆与箭头两块拼的）。
+ */
+function tAtArc(path: number[], dist: number, fromEnd: boolean): { t: number; total: number } {
+  const steps = Math.max(32, Math.min(512, Math.ceil(cubicLength(path) / 2)));
+  const s = sampleCubic(path, steps);
+  const cum: number[] = new Array<number>(steps + 1);
+  cum[0] = 0;
+  for (let i = 1; i <= steps; i++) {
+    cum[i] = cum[i - 1]! + Math.hypot(s[i * 2]! - s[(i - 1) * 2]!, s[i * 2 + 1]! - s[(i - 1) * 2 + 1]!);
+  }
+  const total = cum[steps]!;
+  const target = fromEnd ? total - dist : dist;
+  if (target <= 0) return { t: fromEnd ? 1 : 0, total };
+  if (target >= total) return { t: fromEnd ? 0 : 1, total };
+  let i = 1;
+  while (i < steps && cum[i]! < target) i++;
+  const segLen = cum[i]! - cum[i - 1]!;
+  const frac = segLen > 0 ? (target - cum[i - 1]!) / segLen : 0;
+  return { t: (i - 1 + frac) / steps, total };
+}
+
+/**
+ * 三次贝塞尔末端回缩：截掉终点处约 dist 弧长的一段（曲线形状不变），
  * 让线杆的圆头线帽藏进箭头端点内部 —— 否则圆帽从三角尖端冒出来，箭头看着像圆头。
  * 曲线总长不足回缩量的 1.2 倍时原样返回（不缩）。
  */
 export function trimCubicEnd(path: number[], dist: number): number[] {
   if (dist <= 0) return path;
-  const total = cubicLength(path);
+  const { t, total } = tAtArc(path, dist, true);
   if (total < dist * 1.2) return path;
-  // 数值求 t：末端剩余弧长 ≈ dist
-  const s = sampleCubic(path, 48);
-  let remaining = 0;
-  let t = 1;
-  const seg = total / 48;
-  for (let i = 48; i > 0; i--) {
-    remaining += seg;
-    if (remaining >= dist) {
-      t = i / 48;
-      break;
-    }
-  }
   return cubicPrefix(path, t);
 }
 
 /** 三次贝塞尔起端回缩（对称） */
 export function trimCubicStart(path: number[], dist: number): number[] {
   if (dist <= 0) return path;
-  const total = cubicLength(path);
+  const { t, total } = tAtArc(path, dist, false);
   if (total < dist * 1.2) return path;
-  const s = sampleCubic(path, 48);
-  let travelled = 0;
-  let t = 0;
-  const seg = total / 48;
-  for (let i = 1; i <= 48; i++) {
-    travelled += seg;
-    if (travelled >= dist) {
-      t = i / 48;
-      break;
-    }
-  }
   return cubicSuffix(path, t);
 }
 

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { parseInline } from '../src/core/mdInline';
 import { _setMeasureCtxForTests, autoTextHeight, autoTextWidth, layoutText } from '../src/engine/textMeasure';
 import { snapMove } from '../src/core/snap';
+import { normalizeRotation } from '../src/core/geometry';
 import { effectiveBackground, mergeSettings, textBorderDefaults, DEFAULT_SETTINGS, textStyleDefaults } from '../src/core/defaults';
 import { Document } from '../src/core/Document';
 import { darkenColor } from '../src/engine/palette';
@@ -123,6 +124,58 @@ describe('吸附系统', () => {
     const result = snapMove({ x: 104, y: 0, width: 50, height: 50 }, [{ x: 100, y: 0, width: 50, height: 50 }], { ...settings, enabled: false }, 1, 24);
     expect(result.dx).toBe(0);
     expect(result.guides).toHaveLength(0);
+  });
+
+  it('网格吸附按边缘贴格，不受阈值限制', () => {
+    const grid = { ...settings, gridSnap: true, objectSnap: false };
+    // 左边缘 107 距最近格线 96 差 11（超过对象阈值 10）：旧实现此处不吸附
+    const result = snapMove({ x: 107, y: 100, width: 50, height: 50 }, [], grid, 1, 24);
+    expect(result.dx).toBeCloseTo(-11);
+    expect(result.dy).toBeCloseTo(-4);
+    expect(result.guides).toHaveLength(0);
+  });
+
+  it('网格吸附取整的是边缘而非中心', () => {
+    const grid = { ...settings, gridSnap: true, objectSnap: false };
+    const result = snapMove({ x: 100, y: 0, width: 137, height: 40 }, [], grid, 1, 24);
+    const left = 100 + result.dx;
+    expect(left).toBeCloseTo(96);
+    expect((left + 137 / 2) % 24).not.toBeCloseTo(0);
+  });
+
+  it('对象吸附优先于网格吸附，且逐轴兜底', () => {
+    const both = { ...settings, gridSnap: true };
+    const result = snapMove(
+      { x: 104, y: 100, width: 50, height: 50 },
+      [{ x: 100, y: 400, width: 50, height: 50 }],
+      both,
+      1,
+      24,
+    );
+    expect(result.dx).toBeCloseTo(-4); // X 轴命中对象左边缘
+    expect(result.dy).toBeCloseTo(-4); // Y 轴无对象候选 → 落到格线 96
+    expect(result.guides.some((g) => g.axis === 'v')).toBe(true);
+    expect(result.guides.some((g) => g.axis === 'h')).toBe(false);
+  });
+
+  it('关闭网格吸附时保持自由位置', () => {
+    const off = { ...settings, gridSnap: false, objectSnap: false };
+    const result = snapMove({ x: 108, y: 100, width: 50, height: 50 }, [], off, 1, 24);
+    expect(result.dx).toBe(0);
+    expect(result.dy).toBe(0);
+  });
+});
+
+describe('旋转角归一化', () => {
+  it('归一化到 [-180, 180)，视觉等价', () => {
+    expect(normalizeRotation(0)).toBe(0);
+    expect(normalizeRotation(45)).toBe(45);
+    expect(normalizeRotation(180)).toBe(-180); // 与 +180 同一条对角线
+    expect(normalizeRotation(270)).toBe(-90);
+    expect(normalizeRotation(360)).toBe(0);
+    expect(normalizeRotation(-90)).toBe(-90);
+    expect(normalizeRotation(720 + 30)).toBe(30);
+    expect(normalizeRotation(-180)).toBe(-180);
   });
 });
 

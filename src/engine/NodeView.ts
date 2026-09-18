@@ -1,13 +1,13 @@
 /** 节点渲染视图：数据 → Konva 场景图。视觉字段变化时重建，位置尺寸变化时就地更新。 */
 import Konva from 'konva';
 import type { CanvasNode } from '../core/types';
-import { rectContains, type Rect } from '../core/geometry';
+import { rectContains, rectCenter, rotatePoint, lineHitTolerance, type Rect } from '../core/geometry';
 import { isContainerNode, isFileNode, isLineLike, isShapeNode, isTextNode } from '../core/types';
 import { CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from '../core/defaults';
 import type { Palette } from './palette';
 import { resolveColor } from './palette';
-import { arrowHeadParts, addHeadShapes, headLength } from './arrowHead';
-import { arrowCurve, cubicMidpoint, dashArray, polylineMidpoint, sampleCubic, trimCubicEnd, trimCubicStart } from '../core/arrowLink';
+import { arrowPaintShape } from './arrowPaint';
+import { arrowCurve, cubicMidpoint, dashArray, linePolyline, polylineMidpoint, sampleCubic } from '../core/arrowLink';
 import { fontString, fontVerticalMetrics, layoutText } from './textMeasure';
 import { ImageView } from './ImageView';
 import type { ImageCache as ImageCacheApi } from './imageCache';
@@ -131,6 +131,8 @@ export class NodeView {
   private plateSize: { width: number; height: number } | null = null;
   /** 当前视口缩放（由引擎在视口变化时同步，用于 LOD 与名片反向缩放） */
   private scale = 1;
+  /** 节点变换（位置/旋转/透明度）快照 key：与上次一致时不碰 Konva 属性（避免逐帧 setAttrs） */
+  private transformKey = '';
   /** 文本位图缓存（引擎注入）；未注入时逐帧矢量绘制 */
   private textRaster: TextRasterCache | null;
   /** 本实例的唯一年号 */
@@ -198,12 +200,27 @@ export class NodeView {
     if (curveChanged || this.visualChanged(node)) {
       this.rebuild();
     }
+    // 拖拽时绝大多数节点只是被重新同步一次，变换未变就不碰 Konva 属性
+    this.syncTransform(false);
+  }
+
+  /**
+   * 节点变换：未旋转时以 (x,y) 为原点；旋转时绕节点中心（offset 平移补偿），
+   * 位置/尺寸变化会实时反映到旋转中心上。
+   */
+  private syncTransform(force: boolean): void {
     const g = this.group;
-    const opacity = node.opacity ?? 1;
-    // 拖拽时绝大多数节点只是被重新同步一次，位置/透明度未变就不碰 Konva 属性
-    if (g.x() !== node.x || g.y() !== node.y || g.opacity() !== opacity) {
-      g.setAttrs({ x: node.x, y: node.y, opacity });
-    }
+    const n = this.node;
+    const rot = n.rotation ?? 0;
+    const tx = rot === 0 ? n.x : n.x + n.width / 2;
+    const ty = rot === 0 ? n.y : n.y + n.height / 2;
+    const tox = rot === 0 ? 0 : n.width / 2;
+    const toy = rot === 0 ? 0 : n.height / 2;
+    const opacity = n.opacity ?? 1;
+    const key = `${tx.toFixed(3)}|${ty.toFixed(3)}|${rot.toFixed(3)}|${tox.toFixed(3)}|${toy.toFixed(3)}|${opacity.toFixed(3)}`;
+    if (!force && key === this.transformKey) return;
+    this.transformKey = key;
+    g.setAttrs({ x: tx, y: ty, rotation: rot, offsetX: tox, offsetY: toy, opacity });
   }
 
   /** 视口缩放同步：LOD 在绘制时读取；容器名片按 1/scale 反向缩放，屏幕尺寸保持恒定 */
@@ -263,7 +280,7 @@ export class NodeView {
         inner.y(n.height);
       }
     }
-    this.group.setAttrs({ x: n.x, y: n.y, opacity: n.opacity ?? 1 });
+    this.syncTransform(true);
   }
 
   // ---------- 文本（内联 Markdown 富文本） ----------
@@ -616,84 +633,60 @@ export class NodeView {
     }
 
     // 线类：关系描述文本画在线段中点（曲线取贝塞尔中点，折线按弧长中点）。
-    // 必须在杆/端点之后入组 —— 垫底色牌盖住穿过文字的线杆，文字才可读
+    // 底牌用 destination-out 镂空线杆：完全遮住身后的线，同时保留背景点阵/方格透视。
+    // 必须在杆/端点之后入组 —— 文字盖过穿过其区域的线杆，文字才可读
     if (isLineLike(n) && (n.label ?? '').trim()) {
       const mid = this.curve
         ? cubicMidpoint(this.curve.map((v, i) => (i % 2 === 0 ? v - n.x : v - n.y)))
         : polylineMidpoint(pointsOf(n));
-      const label = new Konva.Label({ listening: false, x: mid.x, y: mid.y });
-      label.add(new Konva.Tag({ fill: this.palette.canvasBg, cornerRadius: 4, opacity: 0.92, listening: false }));
-      label.add(new Konva.Text({ text: n.label!.trim(), fontSize: 13, fontFamily: 'system-ui, sans-serif', fill: this.palette.text, padding: 4, listening: false }));
-      label.offsetX(label.width() / 2);
-      label.offsetY(label.height() / 2);
-      this.inner.add(label);
+      const g = new Konva.Group({ listening: false, x: mid.x, y: mid.y });
+      const txt = new Konva.Text({
+        text: n.label!.trim(),
+        fontSize: 13,
+        fontFamily: 'system-ui, sans-serif',
+        fill: this.palette.text,
+        padding: 4,
+        listening: false,
+      });
+      const w = txt.width();
+      const h = txt.height();
+      const erase = new Konva.Rect({
+        x: -w / 2,
+        y: -h / 2,
+        width: w,
+        height: h,
+        cornerRadius: 5,
+        fill: '#000',
+        globalCompositeOperation: 'destination-out',
+        listening: false,
+      });
+      g.add(erase);
+      txt.position({ x: -w / 2, y: -h / 2 });
+      g.add(txt);
+      this.inner.add(g);
     }
   }
 
   private buildArrow(n: CanvasNode, stroke: string, sw: number): void {
-    const pts = pointsOf(n);
+    const pts = pointsOf(n).map(([x, y]) => ({ x, y }));
     // 端点样式：未显式设置时按形状给默认（arrow = 实心终点，line/polyline = 无）
     const head = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
     const tail = n.tailStyle ?? 'none';
-    const bg = this.palette.canvasBg;
-
-    // 双端绑定：三次贝塞尔杆（两端锚点随被连元素移动，曲线由 Engine 渲染时传入）。
-    // 曲线是世界坐标，节点组内须转为节点局部坐标（减去节点原点）。
-    // 带端点的一侧沿曲线回缩一段（de Casteljau 截断，形状不变），圆头线帽藏进端点内部。
-    if (this.curve) {
-      const retract = headLength(sw) * 0.6;
-      let c = this.curve;
-      if (head !== 'none') c = trimCubicEnd(c, retract);
-      if (tail !== 'none') c = trimCubicStart(c, retract);
-      const local = c.map((v, i) => (i % 2 === 0 ? v - n.x : v - n.y));
-      const [x1, y1, cx1, cy1, cx2, cy2, x2, y2] = local;
-      this.inner.add(
-        new Konva.Line({
-          points: local,
-          bezier: true,
-          stroke,
-          strokeWidth: sw,
-          dash: dashArray(n.strokeStyle, sw),
-          lineCap: 'round',
-          listening: false,
-        }),
-      );
-      if (head !== 'none') {
-        const parts = arrowHeadParts({ x: cx2!, y: cy2! }, { x: x2!, y: y2! }, sw, head);
-        if (parts) addHeadShapes(this.inner, parts, stroke, sw, bg);
-      }
-      if (tail !== 'none') {
-        const parts = arrowHeadParts({ x: cx1!, y: cy1! }, { x: x1!, y: y1! }, sw, tail);
-        if (parts) addHeadShapes(this.inner, parts, stroke, sw, bg);
-      }
-      return;
-    }
-
-    const headParts =
-      pts.length >= 2
-        ? arrowHeadParts({ x: pts[pts.length - 2]![0], y: pts[pts.length - 2]![1] }, { x: pts[pts.length - 1]![0], y: pts[pts.length - 1]![1] }, sw, head)
-        : null;
-    const tailParts = pts.length >= 2 ? arrowHeadParts({ x: pts[1]![0], y: pts[1]![1] }, { x: pts[0]![0], y: pts[0]![1] }, sw, tail) : null;
-
-    // 线杆：两端按端点样式回缩（中间折点保持原位），杆先画、端点后画才能盖住回缩端
-    const shaft: number[] = [];
-    for (let i = 0; i < pts.length; i++) {
-      const p = i === 0 && tailParts ? tailParts.shaftEnd : i === pts.length - 1 && headParts ? headParts.shaftEnd : { x: pts[i]![0], y: pts[i]![1] };
-      shaft.push(p.x, p.y);
-    }
+    // 双端绑定：曲线是世界坐标，节点组内须转为节点局部坐标（减去节点原点）
+    const bezier = this.curve ? this.curve.map((v, i) => (i % 2 === 0 ? v - n.x : v - n.y)) : null;
+    // 线杆 + 两端端点单形状一次绘制：箭头头完全盖住回缩的线杆端，无拼接接缝
     this.inner.add(
-      new Konva.Line({
-        points: shaft,
-        stroke,
-        strokeWidth: sw,
-        dash: dashArray(n.strokeStyle, sw),
-        lineCap: 'round',
-        lineJoin: 'round',
-        listening: false,
-      }),
+      arrowPaintShape(() => ({
+        pts,
+        bezier,
+        sw,
+        head,
+        tail,
+        color: stroke,
+        bg: this.palette.canvasBg,
+        strokeStyle: n.strokeStyle,
+      })),
     );
-    if (tailParts) addHeadShapes(this.inner, tailParts, stroke, sw, bg);
-    if (headParts) addHeadShapes(this.inner, headParts, stroke, sw, bg);
   }
 }
 
@@ -770,37 +763,35 @@ function paintFrame(g: CanvasRenderingContext2D, d: TextDraw): void {
   g.restore();
 }
 
-/** 判断世界坐标点是否命中节点（用于手动拾取）。scale = 视口缩放，容差保证不小于约 6 屏幕像素 */
+/** 判断世界坐标点是否命中节点（用于手动拾取）。scale = 视口缩放，容差换算成屏幕距离 */
 export function hitTestNode(n: CanvasNode, wx: number, wy: number, palette: Palette, scale = 1, get?: (id: string) => CanvasNode | undefined): boolean {
-  const tol = Math.max(4, 6 / scale);
-  if (wx < n.x - tol || wx > n.x + n.width + tol || wy < n.y - tol || wy > n.y + n.height + tol) {
+  // 线类：命中范围严格限定在线段/曲线实体 ± 小范围包边容差，不按包围盒判定——
+  // 1) 包围盒粗筛会把“点空大片空白也选中”的错觉排除：空白处一律不中；
+  // 2) 容差贴着线实体（约 ±4 屏幕像素）：箭头/连线不该比可拖动的实体本身更好点中。
+  if (isLineLike(n)) {
+    const maxDist = lineHitTolerance(n.strokeSize, scale);
+    // 几何取自 linePolyline（与渲染同源）：双端绑定走贝塞尔采样，其余走折点（过翻转镜像）
+    const path = linePolyline(n, get);
+    for (let i = 0; i < path.length - 1; i++) {
+      if (segDist({ x: wx, y: wy }, path[i]!, path[i + 1]!) <= maxDist) return true;
+    }
     return false;
   }
-  if (!isLineLike(n)) return true;
-  // 双端绑定：命中贝塞尔曲线的采样折线（曲线弓起处也应可点中拖动）
-  if (get && n.fromNode && n.toNode) {
-    const curve = arrowCurve(n, get);
-    if (curve) {
-      const s = sampleCubic(curve.path);
-      const maxDist = Math.max(8, (n.strokeSize ?? 2) * 2, 6 / scale);
-      for (let i = 0; i + 3 < s.length; i += 2) {
-        if (segDist({ x: wx, y: wy }, { x: s[i]!, y: s[i + 1]! }, { x: s[i + 2]!, y: s[i + 3]! }) <= maxDist) return true;
-      }
-      return false;
-    }
+  // 非线类（形状/文本/图片）：包围盒内即命中。旋转节点先把指针变换回未旋转的
+  // 局部坐标系再判定 —— 不然旋转后的元素会按轴对齐包围盒误命中大片空白。
+  const tol = Math.max(4, 6 / scale);
+  let px = wx;
+  let py = wy;
+  const rot = n.rotation ?? 0;
+  if (rot !== 0) {
+    const p = rotatePoint({ x: wx, y: wy }, rectCenter({ x: n.x, y: n.y, width: n.width, height: n.height }), -rot);
+    px = p.x;
+    py = p.y;
   }
-  // 线类：精确到线段距离（容差随缩放保证屏幕上始终可点中）。
-  // 折点必须过翻转镜像：视觉线是翻转后的线，否则点中的是「另一条对角线」，
-  // 两线只在中心相交 —— 表现为整条线只有中点能拖动。
-  const pts = pointsOf(n).map(([px, py]) => ({
-    x: n.x + (n.flipX ? n.width - px : px),
-    y: n.y + (n.flipY ? n.height - py : py),
-  }));
-  const maxDist = Math.max(8, (n.strokeSize ?? 2) * 2, 6 / scale);
-  for (let i = 0; i < pts.length - 1; i++) {
-    if (segDist({ x: wx, y: wy }, pts[i]!, pts[i + 1]!) <= maxDist) return true;
+  if (px < n.x - tol || px > n.x + n.width + tol || py < n.y - tol || py > n.y + n.height + tol) {
+    return false;
   }
-  return false;
+  return true;
 }
 
 function segDist(p: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }): number {

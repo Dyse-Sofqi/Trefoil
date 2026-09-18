@@ -1,6 +1,6 @@
 {
   "name": "trefoil",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Trefoil — 思考的可视化工作台：精确几何绘图 + 结构化思维导图容器 + 积木式交互 + 镭射笔演示标注（Obsidian 白板插件）",
   "main": "dist/main.js",
   "type": "module",

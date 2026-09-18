@@ -193,11 +193,11 @@
     <h4>吸附</h4>
     <div class="row">
       <label><input type="checkbox" bind:checked={settings.snap.enabled} />启用吸附</label>
-      <label><input type="checkbox" bind:checked={settings.snap.gridSnap} />磁吸网格</label>
+      <label><input type="checkbox" bind:checked={settings.snap.gridSnap} />吸附网格</label>
       <label><input type="checkbox" bind:checked={settings.snap.objectSnap} />吸附对象</label>
     </div>
     <div class="row">
-      <span>阈值</span>
+      <span>对象阈值</span>
       <input type="range" min="2" max="40" bind:value={settings.snap.threshold} use:wheelAdjust={{ kind: 'value' }} />
       <em>{settings.snap.threshold}px</em>
     </div>

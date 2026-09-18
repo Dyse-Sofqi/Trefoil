@@ -11,8 +11,8 @@ import type { CanvasNode } from '../src/core/types';
 import { parseDoc, serializeDoc } from '../src/data/jsonCanvas';
 import { DEFAULT_SETTINGS, mergeSettings } from '../src/core/defaults';
 import { bakeLineFlip, normalizeLineBBox, setLinePoint } from '../src/core/resize';
-import { shapeRectFromDrag } from '../src/core/geometry';
-import { effectiveEndpoints, isBoundCurve, arrowCurve, sampleCubic, magnetAnchor, syncBoundArrow, trimCubicEnd, trimCubicStart, cubicMidpoint, polylineMidpoint, dashArray } from '../src/core/arrowLink';
+import { shapeRectFromDrag, bezierPath } from '../src/core/geometry';
+import { effectiveEndpoints, isBoundCurve, arrowCurve, sampleCubic, magnetAnchor, syncBoundArrow, trimCubicEnd, trimCubicStart, cubicMidpoint, polylineMidpoint, dashArray, isLinkableTarget, lineHitsRect, MAGNET_PX, freezeBoundArrow } from '../src/core/arrowLink';
 import { Document } from '../src/core/Document';
 
 const palette = {} as Palette;
@@ -100,12 +100,12 @@ describe('hitTestNode 线类命中容差（缩放感知）', () => {
     expect(hitTestNode(n, 50, 50, palette, 1)).toBe(true);
   });
 
-  it('低缩放下容差放大：屏幕 6px 内的世界偏移仍可命中', () => {
-    // 对角线上偏移 14 → 真实垂距 ≈ 9.9
-    // scale 0.5 → 容差 max(8, 12) = 12，应命中
-    expect(hitTestNode(n, 50, 64, palette, 0.5)).toBe(true);
-    // scale 1 → 容差 8，不命中
-    expect(hitTestNode(n, 50, 64, palette, 1)).toBe(false);
+  it('命中容差换算成屏幕距离（约 ±4px）：贴着线才选中，缩小视口不放大误选区', () => {
+    // 对角线上 y 偏移 d 的点的垂距 = d / √2
+    expect(hitTestNode(n, 50, 55, palette, 1)).toBe(true); // 垂距 3.5 ≤ 4
+    expect(hitTestNode(n, 50, 60, palette, 1)).toBe(false); // 垂距 7.1 > 4（旧实现容差 8，会凭空选中）
+    expect(hitTestNode(n, 50, 60, palette, 0.5)).toBe(true); // scale 0.5 → 世界容差 8，屏幕仍 ±4px
+    expect(hitTestNode(n, 50, 68, palette, 0.5)).toBe(false); // 垂距 12.7 > 8
   });
 
   it('远离线的点不命中（不因容差放大而误吞大片区域）', () => {
@@ -356,18 +356,47 @@ describe('端点磁吸绑定（arrowLink）', () => {
     expect(b).toEqual({ x: 200, y: 100 });
   });
 
-  it('syncBoundArrow：锚点写回折点，包围盒收紧到两端', () => {
+  it('syncBoundArrow：双端绑定与渲染同源 —— 折点、包围盒、曲线严丝合缝', () => {
     const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 300, 200) : undefined);
     const n = boundArrow('f', 't');
     n.points = [[50, 50], [250, 150]]; // 过期折点
     syncBoundArrow(n, get);
-    // 起点 → f 下缘中点 (50,60)（p1 在下方）；终点 → t 上缘中点 (350,200)（p0 在上方）
+    // 两矩形中心横向偏移占主导 → 左右缘中点（与 arrowCurve 同一套选边），不是上下缘
     expect(n.points![0]).toEqual([0, 0]);
-    expect(n.points![1]).toEqual([300, 140]);
-    expect(n.x).toBe(50);
-    expect(n.y).toBe(60);
-    expect(n.width).toBe(300);
-    expect(n.height).toBe(140);
+    expect(n.points![1]).toEqual([200, 200]);
+    expect(n.x).toBe(100);
+    expect(n.y).toBe(30);
+    expect(n.width).toBe(200);
+    expect(n.height).toBe(200);
+    // 折点世界坐标 == 渲染曲线的首末端点
+    const curve = arrowCurve(n, get)!;
+    expect(n.x + n.points![0]![0]!).toBeCloseTo(curve.path[0]!);
+    expect(n.y + n.points![0]![1]!).toBeCloseTo(curve.path[1]!);
+    expect(n.x + n.points![1]![0]!).toBeCloseTo(curve.path[6]!);
+    expect(n.y + n.points![1]![1]!).toBeCloseTo(curve.path[7]!);
+  });
+
+  it('回归：上下叠放的宽卡片，箭头包围盒贴合实体（不再错位成侧边一条竖线）', () => {
+    // 旧实现按「到边线的轴向距离」选边：宽卡片上下相对时吸到左右边缘中点，
+    // 折点/包围盒缩成元素左侧一条竖线，而渲染用 inferSides 走上下缘 → 选中框与线实体分家
+    const wide = (id: string, y: number): CanvasNode => ({ id, type: 'text', x: 0, y, width: 400, height: 100, text: id });
+    const get = (id: string) => (id === 'top' ? wide('top', 0) : id === 'bottom' ? wide('bottom', 300) : undefined);
+    const n = boundArrow('bottom', 'top');
+    syncBoundArrow(n, get);
+    const curve = arrowCurve(n, get)!;
+    // 端点 = 下卡片上缘中点 → 上卡片下缘中点
+    expect([curve.path[0], curve.path[1]]).toEqual([200, 300]);
+    expect([curve.path[6], curve.path[7]]).toEqual([200, 100]);
+    expect(n.x + n.points![0]![0]!).toBeCloseTo(200);
+    expect(n.y + n.points![0]![1]!).toBeCloseTo(300);
+    // 包围盒包住整条曲线（含拱起处），多选选中框/框选范围才与实体一致
+    const samples = sampleCubic(curve.path, 24);
+    for (let i = 0; i + 1 < samples.length; i += 2) {
+      expect(samples[i]!).toBeGreaterThanOrEqual(n.x - 1e-6);
+      expect(samples[i]!).toBeLessThanOrEqual(n.x + n.width + 1e-6);
+      expect(samples[i + 1]!).toBeGreaterThanOrEqual(n.y - 1e-6);
+      expect(samples[i + 1]!).toBeLessThanOrEqual(n.y + n.height + 1e-6);
+    }
   });
 
   it('isBoundCurve / arrowCurve：双端绑定成立才有贝塞尔，端点为边缘锚点', () => {
@@ -403,6 +432,64 @@ describe('端点磁吸绑定（arrowLink）', () => {
     expect(magnetAnchor(210, 130, 10, nodes, visible)).toBeNull();
     // 排除后不吸
     expect(magnetAnchor(210, 130, 30, nodes, visible, 'a')).toBeNull();
+  });
+
+  it('magnetAnchor：多目标排除（自环/重复绑定防护），线类目标一律跳过', () => {
+    const nodes = [rectNode('a', 90, 100), rectNode('b', 90, 260), boundArrow('c')];
+    const visible = () => true;
+    // (210,130) 距 a 右缘 (190,130) 20、距 b 右缘 (190,290) 160：a 更近
+    expect(magnetAnchor(210, 130, 30, nodes, visible, ['b'])?.id).toBe('a');
+    // 同时排除 a 与 b → 无可吸目标（线类 c 不参与）
+    expect(magnetAnchor(210, 130, 30, nodes, visible, ['a', 'b'])).toBeNull();
+    // 线类无论多近都不吸（磁吸目标校验）
+    expect(magnetAnchor(210, 130, 30, nodes, visible, new Set(['a', 'b']))).toBeNull();
+  });
+
+  it('isLinkableTarget：线类形状不可作为绑定目标，文本/形状/图片可', () => {
+    expect(isLinkableTarget(rectNode('t', 0, 0))).toBe(true);
+    expect(isLinkableTarget({ ...boundArrow(), type: 'trefoil/shape', shape: 'rect' })).toBe(true);
+    expect(isLinkableTarget(boundArrow())).toBe(false);
+    expect(isLinkableTarget({ ...boundArrow(), shape: 'line' })).toBe(false);
+    expect(isLinkableTarget({ ...boundArrow(), shape: 'polyline' })).toBe(false);
+  });
+
+  it('commitEdgeRelink：端点重绑落撤销栈，undo 还原原连接、redo 恢复新连接', () => {
+    const doc = new Document();
+    const cmds: unknown[] = [];
+    doc.history = { push: (c) => cmds.push(c) };
+    const a = Document.newNode({ id: 'a', type: 'text', x: 0, y: 0, width: 100, height: 60, text: 'A' });
+    const b = Document.newNode({ id: 'b', type: 'text', x: 300, y: 0, width: 100, height: 60, text: 'B' });
+    const c = Document.newNode({ id: 'c', type: 'text', x: 300, y: 300, width: 100, height: 60, text: 'C' });
+    doc.addNodes([a, b, c]);
+    const edge = Document.newEdge({ id: 'e1', fromNode: 'a', toNode: 'b', fromSide: 'right', toSide: 'left' });
+    doc.edges.push(edge);
+    doc.reindex();
+    // 模拟把 toNode 改连到 c（重绑方向按相对位置推断）
+    edge.toNode = 'c';
+    edge.fromSide = 'right';
+    edge.toSide = 'top';
+    doc.commitEdgeRelink(edge.id, { fromNode: 'a', toNode: 'b', fromSide: 'right', toSide: 'left' });
+    const cmd = cmds[cmds.length - 1] as { undo(): void; redo(): void };
+    cmd.undo();
+    expect(edge.toNode).toBe('b');
+    expect(edge.toSide).toBe('left');
+    cmd.redo();
+    expect(edge.toNode).toBe('c');
+    expect(edge.toSide).toBe('top');
+  });
+
+  it('commitEdgeRelink：绑定未变化时不产生撤销记录', () => {
+    const doc = new Document();
+    const cmds: unknown[] = [];
+    doc.history = { push: (c) => cmds.push(c) };
+    const a = Document.newNode({ id: 'a', type: 'text', x: 0, y: 0, width: 100, height: 60, text: 'A' });
+    const b = Document.newNode({ id: 'b', type: 'text', x: 300, y: 0, width: 100, height: 60, text: 'B' });
+    doc.addNodes([a, b]);
+    const edge = Document.newEdge({ id: 'e1', fromNode: 'a', toNode: 'b', fromSide: 'right', toSide: 'left' });
+    doc.edges.push(edge);
+    doc.reindex();
+    doc.commitEdgeRelink(edge.id, { fromNode: 'a', toNode: 'b', fromSide: 'right', toSide: 'left' });
+    expect(cmds).toHaveLength(1); // 只有 addNodes 的记录
   });
 
   it('removeNodes：删除被绑元素后箭头冻结为直线并清除绑定', () => {
@@ -484,6 +571,180 @@ describe('线型（实线/虚线/点状线）', () => {
     expect(parsed.nodes[0]!.strokeStyle).toBe('dotted');
     const plain = { nodes: [arrowNode()], edges: [] };
     expect(serializeDoc(plain as never)).not.toContain('strokeStyle');
+  });
+});
+
+describe('hitTestNode 线类命中（实体 + 小范围包边，而非包围盒）', () => {
+  const rectNode = (id: string, x: number, y: number): CanvasNode => ({
+    id,
+    type: 'text',
+    x,
+    y,
+    width: 100,
+    height: 60,
+    text: 'A',
+  });
+
+  it('包围盒空白处不命中，线段上命中（窄线 bbox 大）', () => {
+    const n: CanvasNode = {
+      id: 'n1',
+      type: 'trefoil/shape',
+      shape: 'arrow',
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 200,
+      points: [
+        [0, 0],
+        [50, 50],
+      ],
+      strokeSize: 2,
+    };
+    // 线上命中
+    expect(hitTestNode(n, 25, 25, palette, 1)).toBe(true);
+    // 包围盒内的空白（距线段 > 容差）不命中 —— 修复“点空白选中箭头”
+    expect(hitTestNode(n, 150, 150, palette, 1)).toBe(false);
+    expect(hitTestNode(n, 0, 100, palette, 1)).toBe(false);
+  });
+
+  it('双端绑定：曲线实体可点中（采样折线上），弦包围盒角落的空白不命中', () => {
+    const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 300, 0) : undefined);
+    const n: CanvasNode = {
+      id: 'na',
+      type: 'trefoil/shape',
+      shape: 'arrow',
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      points: [
+        [0, 0],
+        [100, 100],
+      ],
+      fromNode: 'f',
+      toNode: 't',
+      strokeSize: 2,
+    };
+    syncBoundArrow(n, get);
+    const curve = arrowCurve(n, get)!;
+    // 曲线上的采样点应命中（长曲线中点也不再点不中）
+    const s = sampleCubic(curve.path, 24);
+    for (let i = 2; i + 3 < s.length; i += 6) {
+      expect(hitTestNode(n, s[i]!, s[i + 1]!, palette, 1, get)).toBe(true);
+    }
+    // 拱起曲线正上方离开曲线 30px 的点不命中（弦包围盒内但不在实体上）
+    const mid = sampleCubic(curve.path, 40);
+    const mx = mid[Math.floor(mid.length / 2)]!;
+    const my = mid[Math.floor(mid.length / 2) + 1]!;
+    expect(hitTestNode(n, mx, my - 30, palette, 1, get)).toBe(false);
+    // 弦包围盒一端的空白（曲线不经过）不命中
+    expect(hitTestNode(n, 100, 0, palette, 1, get)).toBe(false);
+  });
+});
+
+describe('线类框选按实体判定（lineHitsRect）', () => {
+  const diagonal: CanvasNode = {
+    id: 'n1',
+    type: 'trefoil/shape',
+    shape: 'arrow',
+    x: 0,
+    y: 0,
+    width: 200,
+    height: 200,
+    points: [
+      [0, 0],
+      [200, 200],
+    ],
+    strokeSize: 2,
+  };
+
+  it('斜线包围盒内的留白不选中（旧实现按包围盒会把两角空白也算进来）', () => {
+    // 右上三角：在包围盒内，但线走的是左下到右上的对角线，框内无线
+    expect(lineHitsRect(diagonal, { x: 124, y: 4, width: 72, height: 72 })).toBe(false);
+    // 左下三角同样不选中
+    expect(lineHitsRect(diagonal, { x: 4, y: 124, width: 72, height: 72 })).toBe(false);
+  });
+
+  it('触到线段才选中：压住线段 / 线段穿过框（端点在外）都算', () => {
+    expect(lineHitsRect(diagonal, { x: 40, y: 40, width: 20, height: 20 })).toBe(true);
+    expect(lineHitsRect(diagonal, { x: 90, y: 0, width: 20, height: 200 })).toBe(true);
+    // 端点在内
+    expect(lineHitsRect(diagonal, { x: 0, y: 0, width: 10, height: 10 })).toBe(true);
+  });
+
+  it('水平/竖直线的框选：贴着线才算，上下留白不算', () => {
+    const flat: CanvasNode = { ...diagonal, points: [[0, 0], [200, 0]], height: 1 };
+    expect(lineHitsRect(flat, { x: 50, y: -6, width: 40, height: 12 })).toBe(true);
+    expect(lineHitsRect(flat, { x: 50, y: 10, width: 40, height: 40 })).toBe(false);
+  });
+
+  it('双端绑定曲线：按采样的弧线判定（弦包围盒的空白不算）', () => {
+    const get = (id: string) =>
+      id === 'f' ? { id, type: 'text', x: 0, y: 0, width: 100, height: 60, text: 'f' } : id === 't' ? { id, type: 'text', x: 300, y: 200, width: 100, height: 60, text: 't' } : undefined;
+    const bound: CanvasNode = { ...diagonal, fromNode: 'f', toNode: 't' };
+    syncBoundArrow(bound, get);
+    const curve = arrowCurve(bound, get)!;
+    // 曲线拱出处（采样点）在框内 → 选中
+    const s = sampleCubic(curve.path, 24);
+    const midIdx = (Math.floor(s.length / 4) * 2) & ~1;
+    const px = s[midIdx]!;
+    const py = s[midIdx + 1]!;
+    expect(lineHitsRect(bound, { x: px - 3, y: py - 3, width: 6, height: 6 }, get)).toBe(true);
+    // 弦包围盒左下角（曲线不经过）→ 不选中
+    expect(lineHitsRect(bound, { x: 100, y: 200, width: 40, height: 40 }, get)).toBe(false);
+  });
+});
+
+describe('freezeBoundArrow 绑定冻结', () => {
+  it('整体冻结：锚点固化进折点并清除全部绑定', () => {
+    const get = (id: string) => (id === 'f' ? { id, type: 'text', x: 0, y: 0, width: 100, height: 60, text: 'f' } : undefined);
+    const n: CanvasNode = {
+      id: 'na',
+      type: 'trefoil/shape',
+      shape: 'arrow',
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      points: [
+        [0, 0],
+        [100, 100],
+      ],
+      fromNode: 'f',
+      toNode: undefined,
+      strokeSize: 2,
+    };
+    syncBoundArrow(n, get);
+    freezeBoundArrow(n, get);
+    expect(n.fromNode).toBeUndefined();
+    expect(n.toNode).toBeUndefined();
+    expect(n.points!.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('bezierPath 端部切线跟随弧线（尾部不再垂直正对元素）', () => {
+  it('水平对齐：法向≈弦向，曲线与旧版一致', () => {
+    const { path } = bezierPath({ x: 100, y: 30 }, 'right', { x: 300, y: 30 }, 'left');
+    expect(path[1]!.y).toBeCloseTo(30);
+    expect(path[2]!.y).toBeCloseTo(30);
+    expect(path[1]!.x).toBeGreaterThan(100);
+    expect(path[2]!.x).toBeLessThan(300);
+  });
+
+  it('斜向连接：起点/终点切线随弧线倾斜（尾部、头部都跟随弧度）', () => {
+    // a 在 (100,30) 右缘，b 在 (350,330) 左缘：弦向 ≈ (0.64, 0.77) 向下
+    const { path } = bezierPath({ x: 100, y: 30 }, 'right', { x: 350, y: 330 }, 'left');
+    const t0 = { x: path[1]!.x - path[0]!.x, y: path[1]!.y - path[0]!.y };
+    const t1 = { x: path[3]!.x - path[2]!.x, y: path[3]!.y - path[2]!.y };
+    // 起点切线不再纯水平：y 分量显著为正（跟随下行的弧线）
+    expect(t0.y).toBeGreaterThan(30);
+    expect(t0.x).toBeGreaterThan(0);
+    // 终点切线朝进入方向（斜向进入，而非垂直）
+    expect(t1.x).toBeGreaterThan(0);
+    expect(t1.y).toBeGreaterThan(0);
+    // 控制点保持在两元素之外（不扎进元素内部）
+    expect(path[1]!.x).toBeGreaterThan(100);
+    expect(path[2]!.x).toBeLessThan(350);
   });
 });
 

@@ -19,7 +19,7 @@ import { LaserTool, EraserTool } from '../tools/AnnotationTools';
 import { PanTool } from '../tools/PanTool';
 import { Clipboard, composeIntoContainer, decomposeContainer } from '../core/clipboard';
 import { writeNodesToSystemClipboard } from '../core/systemClipboard';
-import { computeArrange, type ArrangeParams } from '../core/arrange';
+import { computeArrange, arrangeTargets, resolveRingCenter, type ArrangeParams } from '../core/arrange';
 import {
   addMapChild,
   addMapSibling,
@@ -28,12 +28,12 @@ import {
   type MapNodeStyle,
 } from '../core/mindmap';
 import { exportPng, exportSvg } from '../exporter';
-import { bezierPath, inferSides, mindmapEdgeCurve, nodeRect, sideAnchor, type Rect } from '../core/geometry';
+import { bezierPath, inferSides, mindmapEdgeCurve, nodeRect, normalizeRotation, sideAnchor, type Rect } from '../core/geometry';
 import { arrowCurve, cubicMidpoint, polylineMidpoint } from '../core/arrowLink';
 import type { HostAdapter, DroppedImages } from './host';
 import { buildContextMenu } from './contextMenu';
 import { bumpRev, closeContextMenu, settings as uiSettings, ui, updateStatus } from './ui.svelte';
-import type { CanvasEdge, CanvasNode } from '../core/types';
+import { canRotate, type CanvasEdge, type CanvasNode } from '../core/types';
 import { extensionForFile, pastedImageName } from '../core/attachment';
 import { isImageFileDrag } from '../core/dragDrop';
 
@@ -474,6 +474,42 @@ export class CanvasApp {
     }, 300);
   }
 
+  /**
+   * 一次性设置选中元素的旋转角（度）：重置按钮等离散操作。
+   * 只作用于可旋转元素（块状），线类与容器会被自动过滤。
+   */
+  setSelectionRotation(deg: number, label = '旋转'): void {
+    if (![...this.doc.selection].some((id) => { const n = this.doc.getNode(id); return n && canRotate(n); })) return;
+    // 先结清进行中的样式会话：否则旋转的撤销记录会和样式会话的记录交叠
+    this.commitSelectionStyle();
+    this.updateSelectionProps({ rotation: normalizeRotation(deg) }, label);
+  }
+
+  /**
+   * 连续调整旋转角（面板数字框输入中）：实时生效，停顿后合并为一条撤销记录。
+   * 输入过程中不归一 —— 打 "270" 的中途不该被改写成 "-90"，归一留给 commitSelectionRotation。
+   */
+  liveSelectionRotation(deg: number): void {
+    if (!this.doc.selection.size) return;
+    this.liveSelectionProps({ rotation: deg }, '旋转');
+  }
+
+  /** 结束旋转输入（数字框失焦 / 回车）：按归一化角度落盘，并与进行中的样式会话合并为一条撤销记录 */
+  commitSelectionRotation(deg: number): void {
+    const nodes = [...this.doc.selection]
+      .map((id) => this.doc.getNode(id))
+      .filter((n): n is CanvasNode => !!n && canRotate(n));
+    if (!nodes.length) return;
+    const d = normalizeRotation(deg);
+    if (nodes.some((n) => Math.abs((n.rotation ?? 0) - d) > 1e-6)) {
+      // 这次归一化修正发生在样式会话窗口内 → commitStyle 会把它并进同一条撤销记录
+      this.doc.live(() => {
+        for (const n of nodes) n.rotation = d;
+      });
+    }
+    this.commitSelectionStyle();
+  }
+
   /** 连续调整的多目标版本：每个节点各自的补丁（多选改字号时框高各异） */
   liveSelectionPatches(patches: Map<string, Partial<CanvasNode>>, label = '修改样式'): void {
     if (!patches.size) return;
@@ -499,8 +535,11 @@ export class CanvasApp {
   /** 进行中的排列会话：起点快照（撤销 / 重作用），停顿后经 commitPositions 合并为一条撤销记录 */
   private arrangeStarts = new Map<string, { x: number; y: number }>();
   private arrangeTimer: number | null = null;
-  /** 环形排列会话的圆心：会话内固定（首次调用时按当前几何计算），避免滑块重算时圆心漂移 */
+  /** 环形排列的圆心：进入环形模式时按当前布局拟合，之后沿用（见 resolveRingCenter） */
   private arrangeRingCenter: { x: number; y: number } | null = null;
+  /** 上次环形排列的参与元素签名与半径：判断元素是否还待在原来的环上 */
+  private ringFitIds = '';
+  private ringFitRadius = 0;
 
   /**
    * 多选排列（横向 / 纵向 / 矩阵 / 环形）：实时生效，停顿 300ms 后合并为一条撤销记录。
@@ -514,32 +553,30 @@ export class CanvasApp {
     if (!this.arrangeStarts.size) {
       for (const n of nodes) this.arrangeStarts.set(n.id, { x: n.x, y: n.y });
     }
-    // 容器与其子节点同时被选中时，子节点跟随容器平移，不参与独立排位（保持容器内部相对布局）
-    const containers = new Set(nodes.filter((n) => n.type === 'trefoil/container').map((n) => n.id));
-    const independent = nodes.filter((n) => !(n.containerId && containers.has(n.containerId)));
+    // 容器与其子节点同时被选中时，子节点跟随容器平移；线类节点（箭头/直线）也不占排位
+    // —— 它们的包围盒不表示形状，绑定箭头的位置由两端元素推导（参与排位会把真实元素挤乱）
+    const independent = arrangeTargets(nodes);
+    const boxes = independent.map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height }));
     let params = p;
     if (p.mode === 'ring' && p.ring) {
-      if (!this.arrangeRingCenter) {
-        let minX = Infinity;
-        let minY = Infinity;
-        let maxX = -Infinity;
-        let maxY = -Infinity;
-        for (const n of independent) {
-          minX = Math.min(minX, n.x);
-          minY = Math.min(minY, n.y);
-          maxX = Math.max(maxX, n.x + n.width);
-          maxY = Math.max(maxY, n.y + n.height);
-        }
-        this.arrangeRingCenter = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
-      }
-      params = { ...p, ring: { ...p.ring, center: this.arrangeRingCenter } };
+      // 圆心：进入环形模式时按当前布局拟合；同一批元素还待在原环上就沿用，
+      // 不重算 —— 元素上环后包围盒中心与环心不再重合（元素尺寸不同时必有偏移），
+      // 每次点击都重算会把半径越推越大、环整体漂移。
+      const sig = independent.map((n) => n.id).sort().join(',');
+      this.arrangeRingCenter = resolveRingCenter(boxes, {
+        radius: this.ringFitRadius,
+        prevCenter: this.arrangeRingCenter,
+        sameSet: sig === this.ringFitIds,
+      });
+      this.ringFitIds = sig;
+      this.ringFitRadius = p.ring.radius;
+      params = { ...p, ring: { ...p.ring, center: this.arrangeRingCenter ?? undefined } };
     } else {
       this.arrangeRingCenter = null;
+      this.ringFitIds = '';
+      this.ringFitRadius = 0;
     }
-    const positions = computeArrange(
-      independent.map((n) => ({ id: n.id, x: n.x, y: n.y, width: n.width, height: n.height })),
-      params,
-    );
+    const positions = computeArrange(boxes, params);
     this.doc.live(() => {
       for (const n of nodes) {
         const target = positions.get(n.id);
@@ -579,7 +616,6 @@ export class CanvasApp {
   private arrangeCommit(): void {
     const starts = this.arrangeStarts;
     this.arrangeStarts = new Map();
-    this.arrangeRingCenter = null;
     if (!starts.size) return;
     let moved = false;
     for (const [id, s] of starts) {

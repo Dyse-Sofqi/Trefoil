@@ -10,8 +10,9 @@ import { CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from './core
 import { canvasFont, fontVerticalMetrics, layoutText } from './engine/textMeasure';
 import { resolveColor, type Palette } from './engine/palette';
 import { pointsOf } from './engine/NodeView';
-import { arrowHeadParts } from './engine/arrowHead';
-import { arrowCurve } from './core/arrowLink';
+import { layoutArrow } from './engine/arrowPaint';
+import type { ArrowHeadParts } from './engine/arrowHead';
+import { arrowCurve, dashArray } from './core/arrowLink';
 
 export interface ExportOptions {
   transparent: boolean;
@@ -308,56 +309,17 @@ function shapeToSvg(n: CanvasNode, palette: Palette, opacity: string, getNode?: 
     case 'line':
     case 'polyline':
     case 'arrow': {
-      // 双端绑定：与画布渲染同款的三次贝塞尔（端点样式仍生效，切线方向放端点）
-      if (getNode && n.fromNode && n.toNode) {
-        const bg = palette.canvasBg;
-        const curve = arrowCurve(n, getNode);
-        if (curve) {
-          const [cx1x, cx1y, cx2x, cx2y] = [curve.path[2]!, curve.path[3]!, curve.path[4]!, curve.path[5]!];
-          const ax = curve.path[0]!, ay = curve.path[1]!, bx = curve.path[6]!, by = curve.path[7]!;
-          const d = `M ${num(ax)} ${num(ay)} C ${num(cx1x)} ${num(cx1y)}, ${num(cx2x)} ${num(cx2y)}, ${num(bx)} ${num(by)}`;
-          const headSvgC = (style: string, from: readonly number[], to: readonly number[]): string => {
-            const partsH = arrowHeadParts({ x: from[0]!, y: from[1]! }, { x: to[0]!, y: to[1]! }, sw, style as never);
-            if (!partsH) return '';
-            if (partsH.triangle) {
-              const pts3 = partsH.triangle.map((v) => num(v)).join(',');
-              return partsH.hollowFill
-                ? `<polygon points="${pts3}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
-                : `<polygon points="${pts3}" fill="${stroke}"${opacity}/>`;
-            }
-            if (partsH.chevron) {
-              const vp = partsH.chevron.map((v) => num(v)).join(' ');
-              return `<polyline points="${vp}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${opacity}/>`;
-            }
-            if (partsH.circle) {
-              const c = partsH.circle;
-              return partsH.hollowFill
-                ? `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
-                : `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${stroke}"${opacity}/>`;
-            }
-            return '';
-          };
-          const headStyleS = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
-          const tailStyleS = n.tailStyle ?? 'none';
-          return wrap(
-            `<path d="${d}" fill="none"${common} stroke-linecap="round"/>` +
-              (tailStyleS !== 'none' ? headSvgC(tailStyleS, [curve.path[2]!, curve.path[3]!], [ax, ay]) : '') +
-              (headStyleS !== 'none' ? headSvgC(headStyleS, [cx2x, cx2y], [bx, by]) : ''),
-          );
-        }
-      }
-      const pts = pointsOf(n).map(([px, py]) => ({ x: x + px, y: y + py }));
-      // 端点样式与画布渲染一致（arrow 缺省实心终点）；两端回缩后再画端点
-      const head = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
-      const tail = n.tailStyle ?? 'none';
-      const headParts = arrowHeadParts(pts[pts.length - 2]!, pts[pts.length - 1]!, sw, head);
-      const tailParts = pts.length >= 2 ? arrowHeadParts(pts[1]!, pts[0]!, sw, tail) : null;
-      const shaft = pts.map((p, i) =>
-        i === 0 && tailParts ? tailParts.shaftEnd : i === pts.length - 1 && headParts ? headParts.shaftEnd : p,
-      );
-      const ptsStr = shaft.map((p) => `${num(p.x)},${num(p.y)}`).join(' ');
+      const headStyle = n.headStyle ?? (n.shape === 'arrow' ? 'solid' : 'none');
+      const tailStyle = n.tailStyle ?? 'none';
       const bg = palette.canvasBg;
-      const headSvg = (parts: ReturnType<typeof arrowHeadParts>): string => {
+      // 与画布渲染共用同一份布局（layoutArrow）：线杆按端点回缩、端点件用回缩后的杆端定向。
+      // 导出另写一套几何会出现「导出图里线杆从箭头里冒出来」这类只在导出时可见的错位。
+      const curve = getNode && n.fromNode && n.toNode ? arrowCurve(n, getNode)?.path ?? null : null;
+      const pts = pointsOf(n).map(([px, py]) => ({ x: x + px, y: y + py }));
+      const layout = layoutArrow({ pts, bezier: curve, sw, head: headStyle, tail: tailStyle, color: stroke, bg });
+      const d = dashArray(n.strokeStyle, sw);
+      const dash = d ? ` stroke-dasharray="${num(d[0]!)} ${num(d[1]!)}"` : '';
+      const endSvg = (parts: ArrowHeadParts | null): string => {
         if (!parts) return '';
         if (parts.triangle) {
           const points = parts.triangle.map((v) => num(v)).join(',');
@@ -370,18 +332,22 @@ function shapeToSvg(n: CanvasNode, palette: Palette, opacity: string, getNode?: 
           return `<polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${opacity}/>`;
         }
         if (parts.circle) {
+          const c = parts.circle;
           return parts.hollowFill
-            ? `<circle cx="${num(parts.circle.x)}" cy="${num(parts.circle.y)}" r="${num(parts.circle.r)}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
-            : `<circle cx="${num(parts.circle.x)}" cy="${num(parts.circle.y)}" r="${num(parts.circle.r)}" fill="${stroke}"${opacity}/>`;
+            ? `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${bg}" stroke="${stroke}" stroke-width="${sw}"${opacity}/>`
+            : `<circle cx="${num(c.x)}" cy="${num(c.y)}" r="${num(c.r)}" fill="${stroke}"${opacity}/>`;
         }
         return '';
       };
-      const dash = n.strokeStyle === 'dashed' ? ` stroke-dasharray="${num(Math.max(8, sw * 4))} ${num(Math.max(6, sw * 2.8))}"` : n.strokeStyle === 'dotted' ? ` stroke-dasharray="1 ${num(Math.max(4, sw * 2.4))}"` : '';
-      return wrap(
-        `<polyline points="${ptsStr}" fill="none"${common}${dash} stroke-linecap="round" stroke-linejoin="round"/>` +
-          headSvg(tailParts) +
-          headSvg(headParts),
-      );
+      let shaftSvg: string;
+      if (layout.shaft.kind === 'bezier') {
+        const p = layout.shaft.path;
+        shaftSvg = `<path d="M ${num(p[0]!)} ${num(p[1]!)} C ${num(p[2]!)} ${num(p[3]!)}, ${num(p[4]!)} ${num(p[5]!)}, ${num(p[6]!)} ${num(p[7]!)}" fill="none"${common}${dash} stroke-linecap="round"/>`;
+      } else {
+        const ptsStr = layout.shaft.pts.map((p) => `${num(p.x)},${num(p.y)}`).join(' ');
+        shaftSvg = `<polyline points="${ptsStr}" fill="none"${common}${dash} stroke-linecap="round" stroke-linejoin="round"/>`;
+      }
+      return wrap(shaftSvg + endSvg(layout.tail) + endSvg(layout.head));
     }
     default:
       return '';

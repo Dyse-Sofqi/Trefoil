@@ -6,11 +6,11 @@
  */
 import Konva from 'konva';
 import type { Document } from '../core/Document';
-import { isContainerNode, isLineLike } from '../core/types';
+import { isContainerNode, isLineLike, canRotate } from '../core/types';
 import { paintOrder } from '../core/zorder';
 import { arrowCurve, isBoundCurve, sampleCubic, syncBoundArrow } from '../core/arrowLink';
 import { bezierPath, mindmapEdgeCurve, inferSides, sideAnchor } from '../core/geometry';
-import { rectsIntersect, unionRect, type Rect, type Vec, nodeRect, rectContains } from '../core/geometry';
+import { rectsIntersect, unionRect, lineHitTolerance, rectCenter, nodeTopCenter, type Rect, type Vec, nodeRect, rectContains } from '../core/geometry';
 import type { BackgroundSettings, LaserSettings } from '../core/defaults';
 import type { Palette } from './palette';
 import { darkenColor } from './palette';
@@ -43,6 +43,8 @@ export function emptyOverlayState(): OverlayState {
     selection: [],
     handles: null,
     endpoints: null,
+    edgeEndpoints: null,
+    rotation: null,
     marquee: null,
     guides: [],
     eraserCursor: null,
@@ -53,6 +55,7 @@ export function emptyOverlayState(): OverlayState {
     lineDraft: null,
     edgeDraft: null,
     ports: [],
+    magnet: null,
     edgeSelect: null,
   };
 }
@@ -369,8 +372,9 @@ export class Engine {
       if (!from || !to) continue;
       const flat = edgeCurvePath(e, nodeRect(from), nodeRect(to));
       if (!flat) continue;
-      const s = sampleCubic(flat);
-      const maxDist = Math.max(8, 6 / this.vp.scale);
+      const s = sampleCubic(flat, 24);
+      // 容差与线类节点同源：贴着曲线实体才选中（连线不比线类箭头更好点中）
+      const maxDist = lineHitTolerance(undefined, this.vp.scale);
       for (let k = 0; k + 3 < s.length; k += 2) {
         if (segDist2({ x: wx, y: wy }, { x: s[k]!, y: s[k + 1]! }, { x: s[k + 2]!, y: s[k + 3]! }) <= maxDist) {
           return { kind: 'edge', edgeId: e.id };
@@ -409,6 +413,8 @@ export class Engine {
     const selected = this.doc.selectedNodes().filter((n) => !this.isNodeHidden(n.id) && n.id !== this.editingNodeId);
     st.handles = null;
     st.endpoints = null;
+    st.edgeEndpoints = null;
+    st.rotation = null;
     const single = !st.erasePreview.length && selected.length === 1 ? selected[0] : null;
     if (single && isLineLike(single)) {
       // 线类（直线/箭头/折线）单选：不画包围盒边框，只显示端点手柄 —— 拖端点改形状。
@@ -421,8 +427,25 @@ export class Engine {
     } else {
       st.selection = selected.map((n) => nodeRect(n));
       if (single) {
-        // 文本框高度由内容自适应：拖拽上下无法改变高度，不提供上下中点手柄
-        st.handles = single.type === 'text' ? { ...st.selection[0], hideVertical: true } : st.selection[0];
+        const rot = single.rotation ?? 0;
+        // 块状元素单选：顶部显示旋转手柄（未旋转也显示，方便直接起手旋转）
+        if (canRotate(single)) {
+          st.rotation = {
+            angle: rot,
+            rect: nodeRect(single),
+            center: rectCenter(nodeRect(single)),
+            top: nodeTopCenter(single),
+          };
+        }
+        if (canRotate(single) && rot !== 0) {
+          // 已旋转：选中框随角度重画（Overlay 由 rotation 状态画出），
+          // 8 向缩放手柄在旋转坐标系下语义不成立，隐藏 —— 旋转回 0° 后恢复
+          st.selection = [];
+          st.handles = null;
+        } else {
+          // 文本框高度由内容自适应：只保留四角缩放手柄（上下/左右中点手柄不出现）
+          st.handles = single.type === 'text' ? { ...nodeRect(single), cornerOnly: true } : nodeRect(single);
+        }
       }
     }
     if (this.focusNodeId) {
@@ -459,6 +482,22 @@ export class Engine {
         }));
         st.edgeSelect = { path: pts.flatMap((p) => [p.x, p.y]), bezier: false };
         break;
+      }
+    }
+    // 单选连线（非导图分支线）：两端显示手柄，拖端点重新绑定 fromNode / toNode
+    if (this.doc.selection.size === 1) {
+      const only = [...this.doc.selection][0];
+      const e = only ? this.doc.getEdge(only) : undefined;
+      const from = e ? this.doc.getNode(e.fromNode) : undefined;
+      const to = e ? this.doc.getNode(e.toNode) : undefined;
+      if (e && e.kind !== 'mindmap' && from && to && !this.isNodeHidden(from.id) && !this.isNodeHidden(to.id)) {
+        const sides = inferSides(nodeRect(from), nodeRect(to));
+        const fromSide = (e.fromSide ?? sides.fromSide) as 'top' | 'bottom' | 'left' | 'right';
+        const toSide = (e.toSide ?? sides.toSide) as 'top' | 'bottom' | 'left' | 'right';
+        st.edgeEndpoints = [
+          { id: 'edge-from', pos: sideAnchor(nodeRect(from), fromSide) },
+          { id: 'edge-to', pos: sideAnchor(nodeRect(to), toSide) },
+        ];
       }
     }
     st.containerHover = this.hoverContainerId

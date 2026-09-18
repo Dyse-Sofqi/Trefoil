@@ -180,6 +180,24 @@ describe('JSON Canvas 序列化', () => {
     expect(parsed.nodes[0]?.stroke).toBe('5');
   });
 
+  it('旋转角 rotation 经 trefoil: 前缀往返保留；0°（默认）不落盘', () => {
+    const doc: CanvasDoc = {
+      nodes: [
+        { id: 'r1', type: 'trefoil/shape', x: 10, y: 20, width: 100, height: 60, shape: 'rect', rotation: 45 },
+        { id: 'r2', type: 'text', x: 0, y: 0, width: 100, height: 30, text: 'x', rotation: 0 },
+      ],
+      edges: [],
+    };
+    const raw = JSON.parse(serializeDoc(doc));
+    expect(raw.nodes[0]['trefoil:rotation']).toBe(45);
+    // rotation 0 = 默认不旋转，写盘为噪音，应跳过（与 fillOpacity 0 不同——见容器背景测试）
+    expect(raw.nodes[1]['trefoil:rotation']).toBeUndefined();
+
+    const parsed = parseDoc(serializeDoc(doc));
+    expect(parsed.nodes[0]).toMatchObject({ rotation: 45 });
+    expect(parsed.nodes[1]?.rotation).toBeUndefined();
+  });
+
   it('容器背景色 / 背景透明度 / 圆角往返保留（fillOpacity = 0 也要落盘）', () => {
     const doc: CanvasDoc = {
       nodes: [

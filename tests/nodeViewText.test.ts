@@ -303,3 +303,40 @@ describe('文本节点渲染：位图缓存与矢量回退', () => {
     expect(cache.stats.count).toBe(1);
   });
 });
+
+describe('旋转：group 变换', () => {
+  beforeEach(() => {
+    stubDocument();
+    _setMeasureCtxForTests({ font: '', measureText: (t: string) => ({ width: t.length * 8 }) });
+  });
+  afterEach(() => {
+    _setMeasureCtxForTests(null);
+    delete (globalThis as Record<string, unknown>).document;
+  });
+
+  it('旋转节点绕中心设置变换；未旋转节点保持 (x,y) 原点', () => {
+    const rotated = makeView(null, { rotation: 90 });
+    expect((rotated.group as unknown as { attrs: Record<string, unknown> }).attrs).toMatchObject({
+      x: 100, // 200×60 → 中心 x
+      y: 30,
+      rotation: 90,
+      offsetX: 100,
+      offsetY: 30,
+    });
+    // rotation 不在视觉字段里：update 只同步变换，不必重建
+    rotated.update(textNode({ rotation: 45 }));
+    expect((rotated.group as unknown as { attrs: Record<string, unknown> }).attrs).toMatchObject({
+      x: 100,
+      y: 30,
+      rotation: 45,
+    });
+    const plain = makeView(null, { id: 't9' });
+    expect((plain.group as unknown as { attrs: Record<string, unknown> }).attrs).toMatchObject({
+      x: 0,
+      y: 0,
+      rotation: 0,
+      offsetX: 0,
+      offsetY: 0,
+    });
+  });
+});

@@ -11,6 +11,7 @@
  */
 
 import type { Vec } from './geometry';
+import { isLineLike } from './types';
 
 export type ArrangeMode = 'horizontal' | 'vertical' | 'matrix' | 'ring';
 export type ArrangeAnchor = 'top-left' | 'center';
@@ -58,6 +59,17 @@ export interface ArrangeParams {
 
 export type ArrangePositions = Map<string, { x: number; y: number }>;
 
+/**
+ * 从选中集合里挑出「独立排位」的元素（其余按跟随者处理）：
+ * - 线类节点（直线/箭头/折线）不占位：它们的包围盒不表示形状（对角线的盒子大半是空的），
+ *   且绑定箭头的位置由两端元素推导 —— 让它们占环位/列位会把真实元素挤得七零八落；
+ * - 容器与其子节点同时被选中时，子节点跟随容器平移，不独立占位（保持容器内部相对布局）。
+ */
+export function arrangeTargets<T extends { id: string; type: string; shape?: string; containerId?: string | null }>(nodes: T[]): T[] {
+  const containers = new Set(nodes.filter((n) => n.type === 'trefoil/container').map((n) => n.id));
+  return nodes.filter((n) => !isLineLike(n) && !(n.containerId && containers.has(n.containerId)));
+}
+
 /** 角度约定：0° = 正上方，顺时针为正，归一化到 [0, 360) */
 function mod360(deg: number): number {
   return ((deg % 360) + 360) % 360;
@@ -73,6 +85,47 @@ function boxesCenter(boxes: ArrangeBox[]): Vec {
   const maxX = Math.max(...boxes.map((b) => b.x + b.width));
   const maxY = Math.max(...boxes.map((b) => b.y + b.height));
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+}
+
+/**
+ * 元素是否仍全待在「以 center 为圆心、radius 为半径」的环上（容差含半径取整误差）。
+ * 用于判断重排时能否沿用原圆心：元素被拖走 / 换了一批元素 → false。
+ */
+export function onRing(boxes: ArrangeBox[], center: Vec, radius: number, tol = 2): boolean {
+  if (!boxes.length) return false;
+  return boxes.every(
+    (b) => Math.abs(Math.hypot(b.x + b.width / 2 - center.x, b.y + b.height / 2 - center.y) - radius) <= tol,
+  );
+}
+
+/**
+ * 环形排列的圆心：同一批元素还待在原环上 → 沿用旧圆心（保证重复排列幂等）；
+ * 否则按当前布局重新拟合（包围盒中心）。
+ *
+ * 必须沿用而不是每次重算：元素上环后，「元素包围盒中心」与环心只在尺寸完全对称时才重合，
+ * 尺寸不同就会偏开一段 —— 用偏移过的参考点重算半径，半径会被越推越大（连续点「环形」的失控增长）。
+ */
+export function resolveRingCenter(
+  boxes: ArrangeBox[],
+  opts: { radius: number; prevCenter: Vec | null; sameSet: boolean; tol?: number },
+): Vec | null {
+  if (!boxes.length) return opts.prevCenter;
+  const { prevCenter, sameSet, radius, tol } = opts;
+  if (prevCenter && sameSet && onRing(boxes, prevCenter, radius, tol)) return prevCenter;
+  return boxesCenter(boxes);
+}
+
+/**
+ * 环形半径拟合：元素几何中心到「包围盒中心」的最大距离（下限 min），
+ * 用于首次进入环形模式时贴合现有位置。
+ * 只在进入模式时算一次 —— 对已排好的环重算，会因尺寸不对称（环心 ≠ 包围盒中心）逐次放大半径。
+ */
+export function fitRingRadius(boxes: ArrangeBox[], min = 40): number {
+  if (!boxes.length) return min;
+  const c = boxesCenter(boxes);
+  let maxDist = min;
+  for (const b of boxes) maxDist = Math.max(maxDist, Math.hypot(b.x + b.width / 2 - c.x, b.y + b.height / 2 - c.y));
+  return Math.round(maxDist);
 }
 
 export function computeArrange(boxes: ArrangeBox[], p: ArrangeParams): ArrangePositions {

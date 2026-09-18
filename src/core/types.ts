@@ -71,6 +71,8 @@ export interface CanvasNode {
   /** 形状翻转（仅 trefoil/shape） */
   flipX?: boolean;
   flipY?: boolean;
+  /** 旋转角（度，缺省 0 = 不旋转）：绕节点中心顺时针旋转；块状元素（文本/图片/非线类形状）支持 */
+  rotation?: number;
   /** line/arrow/polyline 的折点，相对节点 x,y */
   points?: number[][];
   /** 箭头终点（末端）样式；缺省 arrow = solid、line/polyline = none */
@@ -128,5 +130,12 @@ export const isTextNode = (n: CanvasNode) => n.type === NODE_TYPE_TEXT;
 export const isFileNode = (n: CanvasNode) => n.type === NODE_TYPE_FILE;
 export const isShapeNode = (n: CanvasNode) => n.type === NODE_TYPE_SHAPE;
 export const isContainerNode = (n: CanvasNode) => n.type === NODE_TYPE_CONTAINER;
-export const isLineLike = (n: CanvasNode) =>
-  isShapeNode(n) && (n.shape === 'line' || n.shape === 'arrow' || n.shape === 'polyline');
+/** 线类节点（直线/箭头/折线）：几何由 points 决定，不是由包围盒决定的「块状元素」 */
+export const isLineLike = (n: { type: string; shape?: string }) =>
+  n.type === NODE_TYPE_SHAPE && (n.shape === 'line' || n.shape === 'arrow' || n.shape === 'polyline');
+
+/**
+ * 块状元素（文本/图片/非线类形状）可旋转：围绕自身中心，内容整体跟随。
+ * 线类由 points 决定几何、容器包含子节点（子节点是独立顶层元素，不会跟着转），都不支持旋转。
+ */
+export const canRotate = (n: CanvasNode): boolean => !isContainerNode(n) && !isLineLike(n);

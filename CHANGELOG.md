@@ -6,6 +6,82 @@ All notable changes to Trefoil are documented here.
 
 ---
 
+## [1.0.3] - 2026-09-18
+
+一次以「交互稳健性与连接表达」为主的版本：块状元素获得旋转，连线与箭头端点可以重新绑定，
+点选 / 框选 / 吸附 / 删除跟随等连接行为整体收紧；同时修复容器拖动语义、主题切换与箭头接缝等一批问题。
+
+### 新增功能
+
+#### 元素旋转
+
+- **旋转手柄** — 单选文本 / 形状 / 图片时，元素顶部出现旋转手柄（未旋转也显示），绕自身中心拖拽旋转；按住 `Shift` 吸附 15°，松手生成可撤销的「旋转」记录；双击手柄一键归零。
+- **属性面板「旋转」区块** — 数字框实时输入角度（-180 ~ 180，悬停滚轮可调）+ 实时预览 + 「重置」按钮；仅可旋转的元素显示（线类与容器自动过滤）。
+- **持久化** — 旋转角写入扩展字段 `trefoil:rotation`，**0° 不落盘**，旧文件保持干净。
+
+#### 连线与端点重连
+
+- **连线端点重连** — 单选连线（非导图分支）时两端显示圆形手柄，拖动可在四向磁吸下重新绑定到其它元素并实时跟随，松手改连（可撤销 / 重做）；拖到空白恢复原连接；绑定未变化不产生撤销记录。
+- **箭头端点重链** — 单选直线 / 箭头拖端点靠近其它元素，会自动磁吸绑定该端（可撤销 / 重做）。
+- **磁吸可视化** — 拖端点或画箭头时，贴近可连接元素会显示四向吸附端口，并高亮松手时实际会吸附的锚点；提示范围与真实磁吸范围（14 屏幕像素）完全一致，稳定不闪烁。
+
+### 行为变化
+
+- **容器拖动语义修正** — 单击容器边带只选中内容（空容器选中自身）；只有**从边带发起拖拽**容器框才随内容整体搬家（嵌套容器逐层补齐，撤销可还原）；**全选容器内全部元素后从元素发起拖动，容器框不再跟随**。
+- **绑定箭头分场景** — 多选同批移动时箭头保持绑定跟随元素（不脱钩）；单独拖动箭头本体冻结绑定可自由移动，撤销还原磁吸关系；点按即松不再误解除绑定。
+- **网格吸附改为边缘贴格** — 左 / 上边缘直接取整到格线（不再受阈值限制），对象吸附未命中的轴才兜底；自由微调仍可用方向键或按住 `Alt` 拖动。
+- **点选 / 框选按实体判定** — 直线 / 箭头 / 连线按线实体 ±4 屏幕像素命中，不再误选包围盒空白；框选线类按线段实际相交判定（`lineHitsRect`）；双端绑定曲线按采样弧线命中，选中框贴合弧线。
+- **标签底牌镂空** — 关系描述小牌底色改 destination-out 镂空，背景的点阵 / 网格从文字后方透出。
+- **删除部分跟随** — 删除被连接元素时只冻结被删一侧的绑定，另一侧继续跟随幸存元素（此前整条线冻结成直线）。
+- **斜向连线切线倾斜** — 斜向贝塞尔控制点混入弦向，端点切线随弧线倾斜（箭头尾部不再垂直正对元素）；水平 / 垂直连线与旧版一致。
+- **文本框缩放手柄改为仅四角** — 不再显示左右中点手柄。
+- **连线创建统一** — 从元素起笔画箭头，松手在元素或空白都生成同一种箭头节点（此前元素上 = 连线、空白 = 箭头，颜色行为不一致）；松手在元素上即使超出磁吸半径也完成双向绑定，终点锚在朝向起点一侧的边中点，并随目标移动绕边。
+- **环形排列重做** — 线类节点不再参与环上排位；半径只在首次切入时按选中区域拟合（`fitRingRadius`），重复点击沿用原圆心与半径，不再越排越散。
+- 文案统一：「磁吸网格」→「吸附网格」、「阈值」→「对象阈值」。
+
+### 错误修复
+
+1. **箭头接缝** — 线杆与两端端点改在同一个 2D 上下文中一次画完（新模块 `arrowPaint.ts`，无图元拼接接缝），长曲线按弧长自适应回缩（采样密度 32–512 段），修复「圆帽从箭头尖冒出、线杆和箭头像两块拼的」；SVG 导出改用与画布同源的布局，导出图不再错位。
+2. **旋转元素命中错位** — 点选时先把指针逆旋转回局部坐标再判定，旋转后不再按轴对齐包围盒误命中空白。
+3. **容器拖动误带容器框** — 全选容器内容后拖动元素不再连带容器框（见行为变化）。
+4. **主题切换不跟随** — Obsidian 切换主题时 `css-change` 可能先于 body 主题类翻转到达，重绘读到旧主题；改为延迟到下一帧统一重绘（rAF 去重），并以 `MutationObserver` 监听 body 主题类兜底，深浅切换即时生效。
+5. **夜间重载后切回日间背景不变** — 旧版在夜间挂载时把深色底直接写进背景 `color`（污染日间默认值）；夜间配色改走 `colorDark`，并自动迁移已污染的历史数据。
+6. **环形排列越排越散 / 环漂移**（见行为变化）。
+7. **磁吸自环 / 重复绑定** — 磁吸目标支持排除多个 id，线类元素不再作为绑定目标。
+
+### 维护与规范
+
+- 新增 `tests/selectFlow.test.ts`（977 行）、`tests/arrowPaint.test.ts`、`tests/pluginSettings.test.ts` 等交互流与几何单测，全量 317 项通过。
+- `arrowHead` 精简（移除 `addHeadShapes`，抽出 `headRetract`）；`linePolyline` 成为命中 / 框选的唯一几何来源；网格吸附抽为纯函数并补单测。
+
+### 数据格式变更
+
+新增扩展字段 `trefoil:rotation`（元素旋转角，0° 不落盘）。旧文件向后兼容，缺失字段按默认值处理。
+
+### English summary
+
+**New features**
+
+- **Rotation** — a handle appears above a selected text / shape / image; drag to rotate around its centre (`Shift` snaps to 15°), double-click the handle to zero it, and the property panel offers an exact angle input with live preview and a reset button. The angle is persisted as `trefoil:rotation` and omitted when 0°.
+- **Edge re-linking** — select an edge (non-mind-map) to reveal circular handles at both ends; drag one to magnetically re-bind it to another element with four-direction snapping and live follow-through, or drop on empty space to restore the original connection — all undoable, with no history entry when nothing changed. Free arrow / line endpoints snap-bind when dragged near an element.
+- **Magnet preview** — while dragging an endpoint or drawing an arrow, hovering near a connectable element shows its four snap ports and highlights the anchor that will actually be captured, matching the real 14 px magnet radius.
+
+**Behavior changes**
+
+- Container drag semantics: clicking the edge band selects the contents only (an empty container selects itself); the frame follows only when the drag starts on the band itself (nested containers follow layer by layer, undoable); dragging an element no longer drags the frame even when every child is selected.
+- Bound arrows stay attached when moved together with their elements, but freeze and move freely when dragged alone (undo restores the binding); a press-and-release without a drag no longer unbinds an endpoint.
+- Grid snapping now quantises the left / top edge to grid lines (threshold-free), with object snapping as a fallback on the other axis; arrows / lines / edges are hit-tested and marquee-selected by their actual geometry (±4 screen px, arcs by sampled curve) instead of the bounding box.
+- Relationship label plates are knocked out (destination-out) so dots and grid show through behind the text; deleting a bound element freezes only the deleted side while the other keeps following the survivor; diagonal edge Bezier control points blend toward the chord so endpoint tangents tilt with the arc (horizontal / vertical unchanged).
+- Ring arrangement no longer places line-like nodes and keeps its fitted radius and centre across repeated clicks (no more drift); drawing an arrow from an element start now yields the same node whether you release on an element or empty space; text boxes expose only corner resize handles; wording updated ("吸附网格" / "对象阈值").
+
+**Bug fixes**
+
+Arrow seams — shaft and both endpoints painted in a single 2D-context pass (new `arrowPaint.ts`) with arc-length adaptive retraction (32–512 segments), so the round cap never pokes past the tip, and SVG export shares the same layout; hit-testing of rotated elements (pointer inverse-rotated to local coordinates); container frame dragged along by element drags; theme switches not applying (css-change deferred to the next frame with rAF coalescing plus a `MutationObserver` fallback on the body theme class); canvas background stuck dark after reloading Obsidian in night mode (dark colour now carried by `colorDark` instead of polluting `color`, with legacy data migrated); ring-arrange radius / centre drift; magnet targets excluding multiple ids and line-like elements no longer linkable.
+
+**Maintenance:** added `tests/selectFlow.test.ts`, `tests/arrowPaint.test.ts` and `tests/pluginSettings.test.ts` (317 tests passing); `arrowHead` slimmed down and grid snap extracted into pure functions.
+
+---
+
 ## [1.0.2] - 2026-09-17
 
 一次以「绘图表达力」为主线的功能版本：线类元素获得端点绑定、端点样式与线型，容器获得背景与圆角，
@@ -174,6 +250,7 @@ First public release: precise geometric drawing (rectangle, ellipse, diamond, tr
 
 ---
 
+[1.0.3]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.3
 [1.0.2]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.2
 [1.0.1]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.1
 [1.0.0]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.0

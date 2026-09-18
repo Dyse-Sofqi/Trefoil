@@ -6,14 +6,11 @@
 import { Tool, type PointerEvt } from './types';
 import { Document } from '../core/Document';
 import type { ArrowHeadStyle, ShapeKind } from '../core/types';
-import { rectFromPoints, normalizeRect, shapeRectFromDrag, inferSides, sideAnchor, type Vec } from '../core/geometry';
+import { rectFromPoints, normalizeRect, shapeRectFromDrag, sideAnchor, sideAnchors, type Vec } from '../core/geometry';
 import { DEFAULT_SETTINGS, textBorderDefaults, textStyleDefaults } from '../core/defaults';
-import { magnetAnchor } from '../core/arrowLink';
+import { magnetAnchor, MAGNET_PX, anchorToward } from '../core/arrowLink';
 
 const LINE_LIKE: Set<string> = new Set(['line', 'arrow']);
-
-/** 端点磁吸半径（屏幕 px）：落点在此距离内即吸附到元素边缘锚点并建立绑定 */
-const MAGNET_PX = 14;
 
 interface Magnet {
   id: string;
@@ -62,6 +59,7 @@ export class ShapeTool extends Tool {
     this.ctx.engine.overlayState.lineDraft = null;
     this.ctx.engine.overlayState.edgeDraft = null;
     this.ctx.engine.overlayState.ports = [];
+    this.ctx.engine.overlayState.magnet = null;
     this.startMagnet = null;
     this.endMagnet = null;
   }
@@ -71,9 +69,23 @@ export class ShapeTool extends Tool {
     this.ctx.engine.overlayState.lineDraft = null;
     this.ctx.engine.overlayState.edgeDraft = null;
     this.ctx.engine.overlayState.ports = [];
+    this.ctx.engine.overlayState.magnet = null;
     this.startMagnet = null;
     this.endMagnet = null;
     this.ctx.engine.applyOverlay();
+  }
+
+  /** 磁吸提示：显示目标元素四向端口并在当前吸附锚点上高亮；无目标时全部清空 */
+  private showMagnetHint(m: Magnet | null): void {
+    const { engine, doc } = this.ctx;
+    if (m) {
+      const t = doc.getNode(m.id);
+      engine.overlayState.ports = t ? sideAnchors({ x: t.x, y: t.y, width: t.width, height: t.height }) : [];
+      engine.overlayState.magnet = { x: m.x, y: m.y };
+    } else {
+      engine.overlayState.ports = [];
+      engine.overlayState.magnet = null;
+    }
   }
 
   onPointerDown(e: PointerEvt): void {
@@ -106,19 +118,14 @@ export class ShapeTool extends Tool {
         engine.overlayState.lineDraft = null;
         engine.overlayState.edgeDraft = null;
         engine.overlayState.ports = [];
+        engine.overlayState.magnet = null;
         engine.applyOverlay();
         return;
       }
       const a = engine.overlayState.lineDraft?.a ?? { x: e.wx, y: e.wy };
       engine.overlayState.lineDraft = { a, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow', ...this.headTailStyles() };
-      // 悬停目标 Ports
-      const over = engine.pick(e.wx, e.wy);
-      if (over.kind === 'node') {
-        const n = this.ctx.doc.getNode(over.nodeId);
-        engine.overlayState.ports = n ? portAnchors(n.x, n.y, n.width, n.height) : [];
-      } else {
-        engine.overlayState.ports = [];
-      }
+      // 磁吸提示：目标元素四向端口 + 高亮松手会吸附到的锚点（与真实磁吸同一判定）
+      this.showMagnetHint(this.magnet(e.wx, e.wy, this.edgeFrom));
       engine.applyOverlay();
       return;
     }
@@ -127,6 +134,8 @@ export class ShapeTool extends Tool {
       this.draft = null;
       engine.overlayState.draft = null;
       engine.overlayState.lineDraft = null;
+      engine.overlayState.ports = [];
+      engine.overlayState.magnet = null;
       engine.applyOverlay();
       return;
     }
@@ -135,6 +144,8 @@ export class ShapeTool extends Tool {
       // 直线/箭头：预览为真实线段（箭头带头部），跟随拖拽方向可到任意象限；
       // 终点靠近元素边缘时磁吸到锚点（优先于 Shift 角度吸附）
       this.endMagnet = this.magnet(e.wx, e.wy, this.startMagnet?.id);
+      // 磁吸提示：优先显示终点吸附目标；没有终点目标时显示已吸附的起点
+      this.showMagnetHint(this.endMagnet ?? this.startMagnet);
       const magEnd = this.endMagnet ? { x: this.endMagnet.x, y: this.endMagnet.y } : null;
       const end = magEnd ?? (e.shift ? snapAngle(this.draft.start, this.draft.cur) : this.draft.cur);
       engine.overlayState.draft = null;
@@ -155,25 +166,36 @@ export class ShapeTool extends Tool {
     engine.overlayState.lineDraft = null;
     engine.overlayState.edgeDraft = null;
     engine.overlayState.ports = [];
+    engine.overlayState.magnet = null;
 
     // 连线模式结束
     if (this.edgeFrom) {
       const from = doc.getNode(this.edgeFrom);
       const over = engine.pick(e.wx, e.wy);
-      if (from && over.kind === 'node' && over.nodeId !== this.edgeFrom) {
-        const to = doc.getNode(over.nodeId)!;
-        const sides = inferSides({ x: from.x, y: from.y, width: from.width, height: from.height }, { x: to.x, y: to.y, width: to.width, height: to.height });
-        doc.addEdge(Document.newEdge({ fromNode: from.id, toNode: to.id, ...sides }));
-      } else if (from) {
-        // 落在空白 → 独立箭头/直线，起点保持绑定在该元素上；终点靠近其他元素则磁吸绑定
-        const start = sideAnchor({ x: from.x, y: from.y, width: from.width, height: from.height }, nearestSide(from, e.wx, e.wy));
-        const m = this.magnet(e.wx, e.wy, from.id);
-        const end = m ? { x: m.x, y: m.y } : { x: e.wx, y: e.wy };
-        this.createLineNode(start, end, false, { fromId: from.id, toId: m?.id });
+      if (from) {
+        // 统一为「箭头节点 + 端点绑定」：无论松手在元素上还是空白处，都生成同一种
+        // 线类节点（同样的颜色与交互、端点可拖动改链接），不再额外创建「连线 Edge」——
+        // 此前两条路径（元素上松手 → Edge / 空白松手 → 箭头节点）颜色与行为不一致。
+        const fromRect = { x: from.x, y: from.y, width: from.width, height: from.height };
+        const start = sideAnchor(fromRect, nearestSide(from, e.wx, e.wy));
+        if (over.kind === 'node' && over.nodeId !== this.edgeFrom) {
+          // 松手在元素上：即使超出磁吸半径（如目标中间）也建立绑定；
+          // 终点锚在目标朝向起点一侧的边中点，随目标移动自动绕边
+          const to = doc.getNode(over.nodeId)!;
+          const end = anchorToward(to, start);
+          this.createLineNode(start, end, false, { fromId: from.id, toId: to.id });
+        } else {
+          // 落在空白 → 独立箭头/直线，起点保持绑定在该元素上；终点靠近其他元素则磁吸绑定
+          const m = this.magnet(e.wx, e.wy, from.id);
+          const end = m ? { x: m.x, y: m.y } : { x: e.wx, y: e.wy };
+          this.createLineNode(start, end, false, { fromId: from.id, toId: m?.id });
+        }
       }
       this.edgeFrom = null;
       this.startMagnet = null;
       this.endMagnet = null;
+      engine.overlayState.ports = [];
+      engine.overlayState.magnet = null;
       engine.applyOverlay();
       return;
     }
@@ -371,9 +393,4 @@ function nearestSide(n: { x: number; y: number; width: number; height: number },
   if (min === dr) return 'right';
   if (min === dt) return 'top';
   return 'bottom';
-}
-
-function portAnchors(x: number, y: number, width: number, height: number): Vec[] {
-  const r = { x, y, width, height };
-  return [sideAnchor(r, 'top'), sideAnchor(r, 'bottom'), sideAnchor(r, 'left'), sideAnchor(r, 'right')];
 }

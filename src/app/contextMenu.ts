@@ -27,7 +27,7 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
         label: '吸附',
         children: [
           { label: '启用吸附', checked: settings.snap.enabled, action: () => (settings.snap.enabled = !settings.snap.enabled) },
-          { label: '磁吸网格', checked: settings.snap.gridSnap, action: () => (settings.snap.gridSnap = !settings.snap.gridSnap) },
+          { label: '吸附网格', checked: settings.snap.gridSnap, action: () => (settings.snap.gridSnap = !settings.snap.gridSnap) },
           { label: '吸附至对象', checked: settings.snap.objectSnap, action: () => (settings.snap.objectSnap = !settings.snap.objectSnap) },
         ],
       },

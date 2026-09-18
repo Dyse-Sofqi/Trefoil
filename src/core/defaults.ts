@@ -40,9 +40,10 @@ export interface BackgroundSettings {
 
 export interface SnapSettings {
   enabled: boolean;
+  /** 网格吸附：元素左/上边缘取整到格线 */
   gridSnap: boolean;
   objectSnap: boolean;
-  /** 吸附阈值（屏幕 px） */
+  /** 对象吸附阈值（屏幕 px） */
   threshold: number;
   /** 对齐参考线阈值（屏幕 px） */
   guideThreshold: number;

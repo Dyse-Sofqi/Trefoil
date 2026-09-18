@@ -27,11 +27,23 @@ export async function savePluginSettings(plugin: Plugin, settings: TrefoilPlugin
   await plugin.saveData(settings);
 }
 
-/** 将插件默认设置注入白板（含背景底色跟随主题） */
-export function trefoilSettingsFromPlugin(settings: TrefoilPluginSettings, dark: boolean): Partial<TrefoilSettings> {
+/** 主题适配的深色画布底色（Obsidian 风格近黑；旧版本曾把它直接写进 color 造成污染） */
+const LEGACY_BAKED_DARK_BG = '#1e1e22';
+
+/**
+ * 将插件默认设置注入白板（含背景底色随主题适配）。
+ *
+ * 夜间配色由「夜间专用底色」background.colorDark 承担 —— DEFAULT_SETTINGS 已内置
+ * DARK_CANVAS_BG，无需在这里改写任何值。本函数**绝不覆盖 background.color**：
+ * 画布底色在日间模式下原样采用 color（见 effectiveBackground），把深色写进 color 会把
+ * 「日间默认值」污染成「自定义深色」，造成「夜间挂载后切回日间，背景永远停在深色」。
+ */
+export function trefoilSettingsFromPlugin(settings: TrefoilPluginSettings): Partial<TrefoilSettings> {
   const s = structuredCloneSafe(settings.defaults);
-  if (dark) {
-    s.background.color = s.background.color === DEFAULT_SETTINGS.background.color ? '#1e1e22' : s.background.color;
+  // 迁移：旧版本曾把 #1e1e22 直接写进 color（默认值被污染）→ 还原为日间默认
+  //（夜间底色走 colorDark，缺省时 effectiveBackground 兜底 DARK_CANVAS_BG，深色观感不变）
+  if (s.background.color === LEGACY_BAKED_DARK_BG) {
+    s.background.color = DEFAULT_SETTINGS.background.color;
   }
   return s;
 }
