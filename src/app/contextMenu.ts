@@ -3,7 +3,7 @@ import type { CanvasApp } from './CanvasApp';
 import type { ContextMenuInfo } from '../tools/types';
 import { ui } from './ui.svelte';
 import type { CanvasNode } from '../core/types';
-import { NODE_TYPE_SHAPE } from '../core/types';
+import { isClosedShape, isLineLike, NODE_TYPE_SHAPE } from '../core/types';
 import { isMapMember, mapParentId } from '../core/mindmap';
 
 export interface MenuItem {
@@ -81,8 +81,12 @@ export function buildContextMenu(app: CanvasApp, info: ContextMenuInfo): MenuIte
   // 若点击的元素未被选中 → 视为对它的操作
   const target: CanvasNode | null = clicked ?? single;
 
-  if (target && target.type === NODE_TYPE_SHAPE && (target.shape === 'line' || target.shape === 'arrow' || target.shape === 'polyline')) {
+  if (target && isLineLike(target)) {
     items.push({ label: '编辑关系描述', hint: '双击', action: () => app.beginLabelEdit('node', target.id) });
+  }
+
+  if (target && isClosedShape(target)) {
+    items.push({ label: '编辑文本', hint: '双击', action: () => app.beginPathTextEdit(target.id) });
   }
 
   if (target?.type === 'text' && !target.containerId) {
@@ -199,7 +203,7 @@ async function pasteSystemImage(app: CanvasApp, at?: { x: number; y: number }): 
       app.adapter.toast?.('剪贴板里没有图片');
       return;
     }
-    app.pasteImageBlob(blob, `Pasted image.${type.split('/')[1] ?? 'png'}`, at);
+    void app.pasteImageBlob(blob, `Pasted image.${type.split('/')[1] ?? 'png'}`, at);
   } catch {
     app.adapter.toast?.('无法读取系统剪贴板');
   }

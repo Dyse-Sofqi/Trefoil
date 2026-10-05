@@ -5,10 +5,10 @@
  */
 import { Tool, type PointerEvt } from './types';
 import { Document } from '../core/Document';
-import type { ArrowHeadStyle, ShapeKind } from '../core/types';
-import { rectFromPoints, normalizeRect, shapeRectFromDrag, sideAnchor, sideAnchors, type Vec } from '../core/geometry';
+import type { ArrowHeadStyle, ShapeKind, Side } from '../core/types';
+import { nearestRectSide, rectFromPoints, normalizeRect, shapeRectFromDrag, sideAnchor, sideAnchors, type Rect, type Vec } from '../core/geometry';
 import { DEFAULT_SETTINGS, textBorderDefaults, textStyleDefaults } from '../core/defaults';
-import { magnetAnchor, MAGNET_PX, anchorToward } from '../core/arrowLink';
+import { magnetAnchor, MAGNET_PX, anchorToward, isManualEndpoints } from '../core/arrowLink';
 
 const LINE_LIKE: Set<string> = new Set(['line', 'arrow']);
 
@@ -16,6 +16,7 @@ interface Magnet {
   id: string;
   x: number;
   y: number;
+  side: Side;
 }
 
 export class ShapeTool extends Tool {
@@ -23,6 +24,8 @@ export class ShapeTool extends Tool {
   readonly shape: ShapeKind;
   private draft: { start: Vec; cur: Vec } | null = null;
   private edgeFrom: string | null = null;
+  /** 从元素起笔时按下的锚点与边：拖拽预览与松手建线都用它（松手点在别处不再重算选边） */
+  private edgeStart: { anchor: Vec; side: Side } | null = null;
   /** 绘制期间的端点磁吸：起/终点吸附到的元素锚点（建立 fromNode/toNode 绑定） */
   private startMagnet: Magnet | null = null;
   private endMagnet: Magnet | null = null;
@@ -62,6 +65,7 @@ export class ShapeTool extends Tool {
     this.ctx.engine.overlayState.magnet = null;
     this.startMagnet = null;
     this.endMagnet = null;
+    this.edgeStart = null;
   }
 
   onDeactivate(): void {
@@ -72,6 +76,7 @@ export class ShapeTool extends Tool {
     this.ctx.engine.overlayState.magnet = null;
     this.startMagnet = null;
     this.endMagnet = null;
+    this.edgeStart = null;
     this.ctx.engine.applyOverlay();
   }
 
@@ -97,13 +102,16 @@ export class ShapeTool extends Tool {
       this.endMagnet = null;
       const n = this.ctx.doc.getNode(e.pick.nodeId);
       if (n) {
-        const anchor = sideAnchor({ x: n.x, y: n.y, width: n.width, height: n.height }, nearestSide(n, e.wx, e.wy));
-        this.ctx.engine.overlayState.lineDraft = { a: anchor, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow', ...this.headTailStyles() };
+        const r: Rect = { x: n.x, y: n.y, width: n.width, height: n.height };
+        const side = nearestRectSide(r, { x: e.wx, y: e.wy });
+        this.edgeStart = { side, anchor: sideAnchor(r, side) };
+        this.ctx.engine.overlayState.lineDraft = { a: this.edgeStart.anchor, b: { x: e.wx, y: e.wy }, arrow: this.shape === 'arrow', ...this.headTailStyles() };
       }
       return;
     }
     this.startMagnet = null;
     this.endMagnet = null;
+    this.edgeStart = null;
     // 空白起笔：靠近元素边缘时磁吸到锚点（绘制中预览吸附，松手建立绑定）
     const m = LINE_LIKE.has(this.shape) ? this.magnet(e.wx, e.wy) : null;
     this.startMagnet = m;
@@ -115,6 +123,7 @@ export class ShapeTool extends Tool {
     if (this.edgeFrom) {
       if (!(e.raw.buttons & 1)) {
         this.edgeFrom = null;
+        this.edgeStart = null;
         engine.overlayState.lineDraft = null;
         engine.overlayState.edgeDraft = null;
         engine.overlayState.ports = [];
@@ -172,26 +181,28 @@ export class ShapeTool extends Tool {
     if (this.edgeFrom) {
       const from = doc.getNode(this.edgeFrom);
       const over = engine.pick(e.wx, e.wy);
-      if (from) {
+      if (from && this.edgeStart) {
         // 统一为「箭头节点 + 端点绑定」：无论松手在元素上还是空白处，都生成同一种
         // 线类节点（同样的颜色与交互、端点可拖动改链接），不再额外创建「连线 Edge」——
         // 此前两条路径（元素上松手 → Edge / 空白松手 → 箭头节点）颜色与行为不一致。
-        const fromRect = { x: from.x, y: from.y, width: from.width, height: from.height };
-        const start = sideAnchor(fromRect, nearestSide(from, e.wx, e.wy));
+        const start = this.edgeStart.anchor;
         if (over.kind === 'node' && over.nodeId !== this.edgeFrom) {
-          // 松手在元素上：即使超出磁吸半径（如目标中间）也建立绑定；
-          // 终点锚在目标朝向起点一侧的边中点，随目标移动自动绕边
+          // 松手在元素上：即使超出磁吸半径（如目标中间）也建立绑定。智能端点：终点锚在
+          // 目标朝向起点一侧的边中点，随目标移动自动绕边；手动端点：锚在松手位置最近的边
           const to = doc.getNode(over.nodeId)!;
-          const end = anchorToward(to, start);
-          this.createLineNode(start, end, false, { fromId: from.id, toId: to.id });
+          const toRect: Rect = { x: to.x, y: to.y, width: to.width, height: to.height };
+          const endSide = isManualEndpoints() ? nearestRectSide(toRect, { x: e.wx, y: e.wy }) : null;
+          const end = endSide ? sideAnchor(toRect, endSide) : anchorToward(to, start);
+          this.createLineNode(start, end, false, { fromId: from.id, toId: to.id, fromSide: this.edgeStart.side, toSide: endSide ?? undefined });
         } else {
           // 落在空白 → 独立箭头/直线，起点保持绑定在该元素上；终点靠近其他元素则磁吸绑定
           const m = this.magnet(e.wx, e.wy, from.id);
           const end = m ? { x: m.x, y: m.y } : { x: e.wx, y: e.wy };
-          this.createLineNode(start, end, false, { fromId: from.id, toId: m?.id });
+          this.createLineNode(start, end, false, { fromId: from.id, toId: m?.id, fromSide: this.edgeStart.side, toSide: m?.side });
         }
       }
       this.edgeFrom = null;
+      this.edgeStart = null;
       this.startMagnet = null;
       this.endMagnet = null;
       engine.overlayState.ports = [];
@@ -211,7 +222,12 @@ export class ShapeTool extends Tool {
 
     if (LINE_LIKE.has(this.shape)) {
       const end = endM ? { x: endM.x, y: endM.y } : cur;
-      this.createLineNode(start, end, endM ? false : e.shift, { fromId: startM?.id, toId: endM?.id });
+      this.createLineNode(start, end, endM ? false : e.shift, {
+        fromId: startM?.id,
+        toId: endM?.id,
+        fromSide: startM?.side,
+        toSide: endM?.side,
+      });
       return;
     }
 
@@ -234,7 +250,7 @@ export class ShapeTool extends Tool {
     this.ctx.setTool('select');
   }
 
-  private createLineNode(start: Vec, end: Vec, constrain = false, bind?: { fromId?: string; toId?: string }): void {
+  private createLineNode(start: Vec, end: Vec, constrain = false, bind?: { fromId?: string; toId?: string; fromSide?: Side; toSide?: Side }): void {
     const { doc, settings } = this.ctx;
     const snapped = constrain ? snapAngle(start, end) : end;
     const ex = snapped.x;
@@ -260,6 +276,9 @@ export class ShapeTool extends Tool {
       // 端点磁吸绑定：端点锚在元素边缘并随其移动；双端绑定渲染为贝塞尔曲线
       ...(bind?.fromId ? { fromNode: bind.fromId } : {}),
       ...(bind?.toId ? { toNode: bind.toId } : {}),
+      // 手动端点模式：磁吸选中的边写进节点，端点从此锁定在该边；智能模式不写（选边实时推断，保持数据干净）
+      ...(isManualEndpoints() && bind?.fromId && bind.fromSide ? { fromSide: bind.fromSide } : {}),
+      ...(isManualEndpoints() && bind?.toId && bind.toSide ? { toSide: bind.toSide } : {}),
       ...this.headTailStyles(),
     });
     doc.addNodes([node]);
@@ -381,16 +400,4 @@ function snapAngle(start: Vec, end: Vec): Vec {
   const snapped = Math.round(ang / (Math.PI / 4)) * (Math.PI / 4);
   const len = Math.hypot(dx, dy);
   return { x: start.x + Math.cos(snapped) * len, y: start.y + Math.sin(snapped) * len };
-}
-
-function nearestSide(n: { x: number; y: number; width: number; height: number }, wx: number, wy: number): 'top' | 'bottom' | 'left' | 'right' {
-  const dl = Math.abs(wx - n.x);
-  const dr = Math.abs(wx - (n.x + n.width));
-  const dt = Math.abs(wy - n.y);
-  const db = Math.abs(wy - (n.y + n.height));
-  const min = Math.min(dl, dr, dt, db);
-  if (min === dl) return 'left';
-  if (min === dr) return 'right';
-  if (min === dt) return 'top';
-  return 'bottom';
 }

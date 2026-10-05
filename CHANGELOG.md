@@ -6,6 +6,97 @@ All notable changes to Trefoil are documented here.
 
 ---
 
+## [1.0.4] - 2026-10-05
+
+一次以「结构化容器 + 可配置连线 + 形状内嵌文字」为主的版本：容器新增**包裹模式**（尺寸由内容推导、贴合并入单步撤销），闭合图形获得**内嵌文字**，连线获得**连接形态**与**端点模式**两项设置并支持逐条覆盖；同时重做取色弹层与设置面板，修复 `.canvas` 接管失败导致插件加载不了、文字编辑重影、端点绑定撤销等一批问题，并按 Obsidian 上架审核规范完成一轮复查。
+
+### 新增功能
+
+#### 容器包裹模式
+
+- **包裹模式** — 容器开启后尺寸完全由内容推导：包围盒 = 直接子元素包围盒外扩内边距；子元素移动 / 缩放 / 删除 / 文本重排 / 导图增删节点时实时贴合。写入扩展字段 `trefoil:wrapMode`。
+- **内边距** — 0–400 px，滑块 + 数字框 + 悬停滚轮微调；拖动实时预览，停顿后与容器几何合并为一条撤销记录（`trefoil:wrapPadding`，缺省 32 px，与「组合为容器」的外边距同源 —— 组合出的容器再开启包裹时几何不跳变）。
+- **嵌套贴合** — 多层包裹按「由深到浅」贴合：内层先贴合，外层再吃进内层的新几何，每层内边距都保持准确。
+- **贴合并入单步撤销** — 拖拽移动、缩放、端点拖拽、删除子元素、改内边距、导图 Tab/Enter 增删节点、排列等操作产生的贴合，全部并入该操作自身的撤销记录，撤销时子元素与容器几何一起还原。
+- **不再提供缩放手柄** — 包裹容器尺寸由内容决定（手动拉拽会在下次内容变化时回弹），内边距改由属性面板调整；无子元素的容器不参与包裹、保持当前几何。
+
+#### 闭合图形内嵌文字
+
+- **矩形 / 椭圆 / 菱形 / 三角可写文字** — 双击图形、按 `F2` / `Enter`，或右键「编辑文本」进入编辑；文字在形状内水平/垂直居中、限宽换行，文字高于形状时上下对称溢出。
+- **编辑时保留形状本体** — 形状的填充与描边留在画布上，文字编辑框是**透明**覆盖层，原地编辑所见即所得，也不会把图形重复画一遍。
+- **清空即清文字** — 空内容退出编辑时，闭合图形只清除文字并保留形状（普通文本框仍删除元素）。
+
+#### 连线可配置（全局设置 + 单条覆盖）
+
+- **连接形态** — 双端绑定线可选三次贝塞尔曲线（默认）或直线；设置面板提供全局默认，属性面板可对单条线覆盖（扩展字段 `trefoil:boundShape`）。直线形态下包围盒收紧到两端锚点弦，命中与框选按直线判定，切回曲线即恢复。
+- **端点模式** — 智能端点（默认，绑定端随时按方位自动绕到最近的边）/ 手动端点（锚点锁定在磁吸时选中的边，两元素四边锚点可任意配对）。全局默认在设置面板，单条线可覆盖（`trefoil:endpointMode`），锁定的边写入 `trefoil:fromSide` / `trefoil:toSide`；切回智能模式后残留锁定边被忽略，不会污染数据。
+- **起笔锚边与预览一致** — 从元素边带起笔拉线时，按下位置决定起点锚边，手动模式下该边随绑定一起固化。
+
+#### 取色弹层
+
+- **自绘取色面板** — 透明 + 14 个经典色 + 同色相 5 档明暗梯度，可展开 HSV 调色板（饱和度/明度方块 + 色相条）与十六进制输入；替换原先的系统原生取色器。
+- **屏幕吸管** — 内置 Chromium `EyeDropper` 吸管，环境不支持时自动隐藏按钮。
+
+#### 面板与设置
+
+- **设置面板新增「连线」分区** — 全局连接形态与端点模式，并附行为说明文案。
+- **属性面板新增** — 包裹模式开关与内边距、连接形态、端点模式；颜色统一改走取色弹层（填充类颜色支持「透明」，不再罗列预设色块）。
+- **吸附跟随可见背景** — 网格吸附间距跟随当前背景：点阵用点间距，网格与纯色用小格间距（点距 < 4 不画点时回落小格间距），吸附结果与肉眼可见的格子对齐。
+- **面板视觉重做** — 单选改分段控件、开关改自绘轨道、日间/夜间颜色并排成对、标签列统一左对齐。
+
+### 行为变化
+
+- 网格吸附间距跟随可见背景（此前固定按小格间距，点阵背景下吸附与可见点阵错位）。
+- 改连线设置后立即注入几何核心并重渲，已有绑定箭头当场生效，无需重载文件。
+- 排列（环形等）会带动包裹容器一起贴合，撤销时容器几何一并还原。
+- 在旋转过的节点上编辑文字时，编辑框跟随节点旋转，不再与画布错位。
+
+### 错误修复
+
+1. **插件装上就加载失败（Plugin failure）** — `onload` 里无条件 `registerExtensions(['canvas'])`，而 `.canvas` 默认已被内置 Canvas 核心插件注册；Obsidian 的扩展名注册表对重复注册**直接抛异常**，异常从 `onload` 冒出后 Obsidian 判定「Plugin failure」并**自动禁用插件**。现改为容错注册：抢不到扩展名时退回 `file-open` 拦截，把刚打开的 `.canvas` 叶子就地换成白板视图（右键「打开白板视图」仍可手动进入）。
+2. **文字编辑出现重影** — 编辑中的文本节点仍留在画布上，与 DOM 文字编辑框叠成双份（文字双影、边框双框）。现明确分工：编辑闭合图形时保留形状本体、只藏内嵌文字；编辑其它节点时整体隐藏，交给编辑框独占呈现。
+3. **端点拖离绑定后的撤销 / 重做** — 快照用 `undefined` 表示「无绑定」，重做会跳过解绑导致绑定状态残留；现在撤销能恢复绑定与该端锁定边，重做能重新解绑。
+4. **删除被绑定元素后的残留锚边** — 删除元素或整体冻结箭头时同步清除该端锁定边，不再留下指向已删元素的锚边。
+5. **起笔锚边与预览不一致** — 旧实现按松手位置重算选边，起点可能跳到另一条边。
+6. **原生取色器「一按即关」** — 旧实现每次取色都重建 `input[type=color]`，系统弹窗当场被关掉；已改为自绘取色弹层。
+7. **闭合图形编辑态重复绘制** — 编辑形状文字时不再重复画一遍形状背景与实体边框。
+8. **形状文字 / 颜色 / 字体变化不重绘** — `text`、`color`、`fontFamily`、`fontSize`、`fontWeight`、`hAlign`、`boundShape` 纳入形状的重建字段。
+
+### 维护与规范
+
+9. **Obsidian 审核规范复查** — 用完整的 `eslint-plugin-obsidianmd` recommended 规则集复查，**0 error**。本轮修掉：UI 文案 sentence-case（命令名 / Ribbon 提示 / 空状态文案不再重复插件名）、命令 id 不含插件 id、正则中多余的转义字符、`requestAnimationFrame` → `window.requestAnimationFrame`（弹窗窗口兼容），以及四处未处理的 floating promise。
+10. **直接样式写入专项** — 审核规则 *Sets styles directly instead of using CSS classes, `setCssProps`, or `setCssStyles`*（`obsidianmd/no-static-styles-assignment`）在源码中 **0 命中**：没有 `element.style.*` 赋值、没有 `setAttribute('style')`、没有 `cssText`、没有 `setCssProps`/`setCssStyles` 调用；界面样式一律走 CSS 类、Svelte `style:` 指令与 CSS 变量。
+11. **本地 lint 配置补齐审核规则族** — 除 `obsidianmd/*` 与 `no-unsanitized/*`，再加入 `eslint-comments/*`（disable 注释必须带说明、不得禁用受限规则）、`@microsoft/sdl/*` 与 `no-useless-escape`，让本地能第一时间拦住审核会报的问题。
+12. **已知保留 warning** — `obsidianmd/prefer-create-el` ×10（引擎/核心层创建离屏 `canvas`、下载用 `a` 元素仍用 `document.createElement`）：这部分代码同时要在 vitest（无宿主全局）与独立开发台里跑，而 `createEl` 是 Obsidian 宿主注入的全局函数，故有意保留；不影响审核要求中的 error 级规则。
+13. **版本对齐** — `manifest.json` / `package.json` / `versions.json` 统一为 1.0.4。
+14. **文档** — README 补齐本轮功能的中英双语说明；本更新日志新增 1.0.4 段。
+
+### 数据格式变更
+
+新增（`trefoil:` 命名空间）：`wrapMode`、`wrapPadding`、`boundShape`、`fromSide`、`toSide`、`endpointMode`。
+写入规则不变：值为 `undefined` / `null` / `false` / `''` 时一律不落盘，未使用新功能的旧文件保持完全干净；容器子节点坐标仍为文件内相对坐标。插件设置（`data.json`）新增 `link.boundShape` 与 `link.endpointMode`。
+
+### English summary
+
+**New features**
+
+- **Container wrap mode:** a container can derive its geometry from its contents — the box always equals the direct children's bounding box expanded by the wrap padding (default 32 px, adjustable 0–400 px, `trefoil:wrapMode` / `trefoil:wrapPadding`). Nested wrap containers fit inside-out, so every layer keeps an exact padding, and an empty container stops wrapping. All fitting (drag, resize, endpoint drag, child deletion, padding changes, mind-map `Tab`/`Enter`, arrange) is folded into that operation's own undo step, restoring children and container geometry together. Resize handles are removed for wrap containers since the content decides the size.
+- **Inline text on closed shapes:** rectangles, ellipses, diamonds and triangles accept text — double-click, `F2` / `Enter`, or the context menu — centred inside the shape, wrapping at the shape width and overflowing symmetrically when taller than the shape. The shape body stays on the canvas while a transparent editor overlays it, and clearing the text keeps the shape.
+- **Configurable links:** two bound endpoints can render as a cubic Bezier (default) or a straight line, with a global default plus a per-line override (`trefoil:boundShape`); the endpoint mode is either smart (the anchor re-picks the nearest side, default) or manual (the anchor stays locked to the side it snapped to, allowing any side-to-side pairing), again globally and per line (`trefoil:endpointMode`, locked sides in `trefoil:fromSide` / `trefoil:toSide`). Drawing from an element's edge band now fixes the start anchor to where the pointer went down.
+- **Colour picker:** a self-drawn popover with transparency, 14 classic colours, five lightness shades per hue, an expandable HSV panel and a hex field, plus a Chromium `EyeDropper` screen picker (hidden when unsupported).
+- **Panels:** a new "Links" section in settings, wrap-mode / padding / link-shape / endpoint-mode controls in the property panel, grid snapping spacing that follows the visible background (dot spacing for dots, minor grid spacing for grids and solid colours), and a visual rework of the settings panel.
+- The property panel's colour controls all go through the new picker (fills support transparency).
+
+**Bug fixes**
+
+The plugin could fail to load entirely (`Plugin failure`) because `onload` registered the `canvas` extension unconditionally while Obsidian's built-in Canvas plugin already owns it — the registry throws on duplicate extensions, and Obsidian disables a plugin whose `onload` throws; registration is now guarded and falls back to intercepting `file-open`. Ghosting while editing text (the canvas node and the DOM editor drawing the same node) is gone. Also fixed: undo/redo of an endpoint dragged off its binding, stale locked sides left behind when the bound element was deleted or an arrow was frozen, a start anchor that disagreed with the drag preview, the native colour input closing itself on every pick, redundant shape background/border painting while editing, and shape text/colour/font changes not triggering a repaint.
+
+**Maintenance**
+
+Reviewed against the full official `eslint-plugin-obsidianmd` recommended ruleset: **0 errors**. Fixed sentence-case UI text (command names, ribbon tooltip and empty-state copy no longer repeat the plugin name), a command id containing the plugin id, an unnecessary regex escape, `window.requestAnimationFrame` for popout-window compatibility, and four unhandled floating promises. The direct-style rule *Sets styles directly instead of using CSS classes, `setCssProps`, or `setCssStyles`* (`obsidianmd/no-static-styles-assignment`) reports **zero** hits in the source. The local ESLint config now also enforces the review-relevant `eslint-comments/*`, `@microsoft/sdl/*` and `no-useless-escape` rules. Ten `prefer-create-el` warnings are kept on purpose (offscreen canvases and download anchors must also run under vitest and the standalone dev harness, where the host-injected `createEl` global does not exist). Versions aligned to 1.0.4 in `manifest.json`, `package.json` and `versions.json`; README updated with the bilingual feature list.
+
+---
+
 ## [1.0.3] - 2026-09-18
 
 一次以「交互稳健性与连接表达」为主的版本：块状元素获得旋转，连线与箭头端点可以重新绑定，
@@ -250,6 +341,7 @@ First public release: precise geometric drawing (rectangle, ellipse, diamond, tr
 
 ---
 
+[1.0.4]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.4
 [1.0.3]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.3
 [1.0.2]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.2
 [1.0.1]: https://github.com/Dyse-Sofqi/Trefoil/releases/tag/1.0.1

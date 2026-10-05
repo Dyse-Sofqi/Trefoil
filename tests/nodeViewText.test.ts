@@ -24,6 +24,16 @@ vi.mock('konva', () => {
     y() {
       return (this.attrs.y as number) ?? 0;
     }
+    scaleX(v?: number) {
+      if (v === undefined) return (this.attrs.scaleX as number) ?? 1;
+      this.attrs.scaleX = v;
+      return this;
+    }
+    scaleY(v?: number) {
+      if (v === undefined) return (this.attrs.scaleY as number) ?? 1;
+      this.attrs.scaleY = v;
+      return this;
+    }
     opacity() {
       return (this.attrs.opacity as number) ?? 1;
     }
@@ -43,7 +53,7 @@ vi.mock('konva', () => {
       return { width: () => 800 };
     }
   }
-  return { default: { Group: class extends FakeNode {}, Shape: class extends FakeNode {} } };
+  return { default: { Group: class extends FakeNode {}, Shape: class extends FakeNode {}, Rect: class extends FakeNode {} } };
 });
 
 import { NodeView } from '../src/engine/NodeView';
@@ -338,5 +348,70 @@ describe('旋转：group 变换', () => {
       offsetX: 0,
       offsetY: 0,
     });
+  });
+});
+
+describe('闭合图形内嵌文字：双击编辑', () => {
+  beforeEach(() => {
+    stubDocument();
+    _setMeasureCtxForTests({ font: '', measureText: (t: string) => ({ width: t.length * 8 }) });
+  });
+  afterEach(() => {
+    _setMeasureCtxForTests(null);
+    delete (globalThis as Record<string, unknown>).document;
+  });
+
+  function shapeNode(over: Partial<CanvasNode> = {}): CanvasNode {
+    return {
+      id: 's1',
+      type: 'trefoil/shape',
+      shape: 'rect',
+      x: 0,
+      y: 0,
+      width: 200,
+      height: 120,
+      ...over,
+    } as CanvasNode;
+  }
+
+  function makeShapeView(over: Partial<CanvasNode> = {}): NodeView {
+    const view = new NodeView(shapeNode(over), testPalette(), noImages, null, null);
+    resetCounters();
+    return view;
+  }
+
+  /** 内嵌文字的 Konva.Shape 直接挂在 group 下（children[1]），不在 inner 里 */
+  function shapeTextOf(view: NodeView): { attrs: { sceneFunc: (ctx: unknown) => void } } {
+    const g = view.group as unknown as { children: { attrs: { sceneFunc?: unknown } }[] };
+    const shape = g.children[1];
+    if (!shape || typeof shape.attrs.sceneFunc !== 'function') throw new Error('图形没有内嵌文字形状');
+    return shape as { attrs: { sceneFunc: (ctx: unknown) => void } };
+  }
+
+  it('无文字：不创建文本形状', () => {
+    const view = makeShapeView();
+    expect(() => shapeTextOf(view)).toThrow();
+  });
+
+  it('有文字：挂在 group（不随翻转镜像），sceneFunc 矢量绘制', () => {
+    const view = makeShapeView({ text: '居中', flipX: true });
+    const shape = shapeTextOf(view);
+    const inner = (view.group as unknown as { children: unknown[] }).children[0] as unknown as {
+      children: unknown[];
+    };
+    expect(inner.children).toHaveLength(1); // inner 里只有几何
+    shape.attrs.sceneFunc({ _context: scene.ctx });
+    expect(scene.calls.fillText).toBe(1);
+    expect(scene.calls.drawImage).toBe(0);
+  });
+
+  it('编辑中 setTextHidden(true)：sceneFunc 不再绘制文字，形状本体不受影响', () => {
+    const view = makeShapeView({ text: '居中' });
+    view.setTextHidden(true);
+    shapeTextOf(view).attrs.sceneFunc({ _context: scene.ctx });
+    expect(scene.calls.fillText).toBe(0);
+    view.setTextHidden(false);
+    shapeTextOf(view).attrs.sceneFunc({ _context: scene.ctx });
+    expect(scene.calls.fillText).toBe(1);
   });
 });

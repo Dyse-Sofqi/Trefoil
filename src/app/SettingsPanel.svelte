@@ -62,7 +62,7 @@
     { v: 3000, label: '3 秒' },
     { v: 5000, label: '5 秒' },
     { v: 10000, label: '10 秒' },
-    { v: 0, label: '手动清除' },
+    { v: 0, label: '手动' },
   ];
 
   // 点击设置面板外的区域自动关闭（齿轮按钮自身保留切换语义）
@@ -119,17 +119,18 @@
     <h4>背景</h4>
     <div class="row">
       <span>模式</span>
-      <label><input type="radio" bind:group={settings.background.mode} value="solid" />纯色</label>
-      <label><input type="radio" bind:group={settings.background.mode} value="dots" />点阵</label>
-      <label><input type="radio" bind:group={settings.background.mode} value="grid" />网格</label>
+      <div class="seg">
+        <label><input type="radio" bind:group={settings.background.mode} value="solid" /><span>纯色</span></label>
+        <label><input type="radio" bind:group={settings.background.mode} value="dots" /><span>点阵</span></label>
+        <label><input type="radio" bind:group={settings.background.mode} value="grid" /><span>网格</span></label>
+      </div>
     </div>
     <div class="row">
-      <span>底色（日间）</span>
-      <input type="color" bind:value={settings.background.color} />
-    </div>
-    <div class="row">
-      <span>底色（夜间）</span>
-      <input type="color" bind:value={settings.background.colorDark} />
+      <span>底色</span>
+      <div class="pair">
+        <label><input type="color" bind:value={settings.background.color} /><span>日间</span></label>
+        <label><input type="color" bind:value={settings.background.colorDark} /><span>夜间</span></label>
+      </div>
     </div>
     {#if settings.background.mode === 'dots'}
       <div class="row">
@@ -138,23 +139,24 @@
         <em>{settings.background.dotSize}px</em>
       </div>
       <div class="row">
-        <span>点形状</span>
-        <label><input type="radio" bind:group={settings.background.dotShape} value="circle" />圆形</label>
-        <label><input type="radio" bind:group={settings.background.dotShape} value="square" />方形</label>
-        <label><input type="radio" bind:group={settings.background.dotShape} value="diamond" />菱形</label>
-      </div>
-      <div class="row">
-        <span>点颜色（日间）</span>
-        <input type="color" bind:value={settings.background.dotColor} />
-      </div>
-      <div class="row">
-        <span>点颜色（夜间）</span>
-        <input type="color" bind:value={settings.background.dotColorDark} />
-      </div>
-      <div class="row">
         <span>间距</span>
         <input type="range" min="8" max="120" bind:value={settings.background.dotSpacing} use:wheelAdjust={{ kind: 'value' }} />
         <em>{settings.background.dotSpacing}px</em>
+      </div>
+      <div class="row">
+        <span>点形状</span>
+        <div class="seg">
+          <label><input type="radio" bind:group={settings.background.dotShape} value="circle" /><span>圆形</span></label>
+          <label><input type="radio" bind:group={settings.background.dotShape} value="square" /><span>方形</span></label>
+          <label><input type="radio" bind:group={settings.background.dotShape} value="diamond" /><span>菱形</span></label>
+        </div>
+      </div>
+      <div class="row">
+        <span>点颜色</span>
+        <div class="pair">
+          <label><input type="color" bind:value={settings.background.dotColor} /><span>日间</span></label>
+          <label><input type="color" bind:value={settings.background.dotColorDark} /><span>夜间</span></label>
+        </div>
       </div>
     {/if}
     {#if settings.background.mode === 'grid'}
@@ -179,12 +181,11 @@
         <em>{Math.round(settings.background.gridMajorOpacity * 100)}%</em>
       </div>
       <div class="row">
-        <span>网格色（日间）</span>
-        <input type="color" bind:value={settings.background.gridColor} />
-      </div>
-      <div class="row">
-        <span>网格色（夜间）</span>
-        <input type="color" bind:value={settings.background.gridColorDark} />
+        <span>网格色</span>
+        <div class="pair">
+          <label><input type="color" bind:value={settings.background.gridColor} /><span>日间</span></label>
+          <label><input type="color" bind:value={settings.background.gridColorDark} /><span>夜间</span></label>
+        </div>
       </div>
     {/if}
   </section>
@@ -192,15 +193,38 @@
   <section>
     <h4>吸附</h4>
     <div class="row">
-      <label><input type="checkbox" bind:checked={settings.snap.enabled} />启用吸附</label>
-      <label><input type="checkbox" bind:checked={settings.snap.gridSnap} />吸附网格</label>
-      <label><input type="checkbox" bind:checked={settings.snap.objectSnap} />吸附对象</label>
+      <!-- 开关不用 input 本体绘制：Obsidian/主题对 input[type=checkbox] 有全局样式（选中态还会用 ::after 画对勾），
+           无法可靠覆盖；input 只保留交互与无障碍，视觉画在自有的 .track 上，不受主题影响 -->
+      <label class="tgl"><input type="checkbox" bind:checked={settings.snap.enabled} /><span class="track" aria-hidden="true"></span><span>启用吸附</span></label>
+      <label class="tgl"><input type="checkbox" bind:checked={settings.snap.gridSnap} /><span class="track" aria-hidden="true"></span><span>吸附网格</span></label>
+      <label class="tgl"><input type="checkbox" bind:checked={settings.snap.objectSnap} /><span class="track" aria-hidden="true"></span><span>吸附对象</span></label>
     </div>
     <div class="row">
       <span>对象阈值</span>
       <input type="range" min="2" max="40" bind:value={settings.snap.threshold} use:wheelAdjust={{ kind: 'value' }} />
       <em>{settings.snap.threshold}px</em>
     </div>
+    <div class="row trefoil-hint">网格吸附跟随当前背景的格子间距：点阵背景用点间距，网格/纯色背景用小格间距</div>
+  </section>
+
+  <section>
+    <h4>连线</h4>
+    <div class="row">
+      <span>连接样式</span>
+      <div class="seg">
+        <label><input type="radio" bind:group={settings.link.boundShape} value="curve" /><span>曲线</span></label>
+        <label><input type="radio" bind:group={settings.link.boundShape} value="line" /><span>直线</span></label>
+      </div>
+    </div>
+    <div class="row trefoil-hint">箭头/直线两端吸附到元素后的线形（全局默认）；选中绑定箭头后可在属性面板单独覆盖；绑定端始终随元素移动</div>
+    <div class="row">
+      <span>端点模式</span>
+      <div class="seg">
+        <label><input type="radio" bind:group={settings.link.endpointMode} value="smart" /><span>智能</span></label>
+        <label><input type="radio" bind:group={settings.link.endpointMode} value="manual" /><span>手动</span></label>
+      </div>
+    </div>
+    <div class="row trefoil-hint">智能：锚点随另一端方位自动绕到最近的边；手动：锁定拖动时磁吸的边不再自动调整，两元素四边锚点可任意匹配连接；选中绑定箭头后可在属性面板单独覆盖</div>
   </section>
 
   <section>
@@ -208,15 +232,17 @@
     <div class="row">
       <span>颜色</span>
       <input type="color" bind:value={settings.laser.color} />
-      <span>线宽</span>
+      <span class="mid">线宽</span>
       <input type="range" min="2" max="24" bind:value={settings.laser.width} use:wheelAdjust={{ kind: 'value' }} />
       <em>{settings.laser.width}px</em>
     </div>
     <div class="row">
       <span>消失延迟</span>
-      {#each DELAYS as d (d.v)}
-        <label><input type="radio" bind:group={settings.laser.delayMs} value={d.v} />{d.label}</label>
-      {/each}
+      <div class="seg">
+        {#each DELAYS as d (d.v)}
+          <label><input type="radio" bind:group={settings.laser.delayMs} value={d.v} /><span>{d.label}</span></label>
+        {/each}
+      </div>
     </div>
     <div class="row">
       <button onclick={() => app.engine.laser.clearAll()}>清除全部笔迹（Esc）</button>
@@ -262,6 +288,8 @@
         }}
         use:wheelAdjust={{ kind: 'value' }}
       />
+    </div>
+    <div class="row">
       <span>字重</span>
       <input
         type="number"
@@ -285,7 +313,7 @@
           if (e.key === 'Enter') e.currentTarget.blur();
         }}
       />
-      <span>颜色</span>
+      <span class="mid">颜色</span>
       <input type="color" bind:value={settings.text.color} />
     </div>
   </section>
@@ -294,16 +322,18 @@
     <h4>滚轮步进</h4>
     <div class="row">
       <span>步进方式</span>
-      <label><input type="radio" bind:group={settings.wheelStep.mode} value="auto" />自动</label>
-      <label><input type="radio" bind:group={settings.wheelStep.mode} value="value" />固定数值</label>
-      <label><input type="radio" bind:group={settings.wheelStep.mode} value="percent" />百分比</label>
+      <div class="seg">
+        <label><input type="radio" bind:group={settings.wheelStep.mode} value="auto" /><span>自动</span></label>
+        <label><input type="radio" bind:group={settings.wheelStep.mode} value="value" /><span>固定数值</span></label>
+        <label><input type="radio" bind:group={settings.wheelStep.mode} value="percent" /><span>百分比</span></label>
+      </div>
     </div>
-    <div class="row trefoil-wide-label">
+    <div class="row">
       <span>数值步进</span>
       <input type="range" min="0.5" max="50" step="0.5" bind:value={settings.wheelStep.value} use:wheelAdjust={{ kind: 'value' }} />
       <em>{settings.wheelStep.value}</em>
     </div>
-    <div class="row trefoil-wide-label">
+    <div class="row">
       <span>百分比步进</span>
       <input type="range" min="1" max="100" step="1" bind:value={settings.wheelStep.percent} use:wheelAdjust={{ kind: 'value' }} />
       <em>{settings.wheelStep.percent}%</em>
@@ -314,15 +344,17 @@
   <section>
     <h4>查看模式</h4>
     <div class="row">
-      <label><input type="radio" bind:group={settings.viewMode} value="normal" onchange={() => app.setViewMode('normal')} />正常</label>
-      <label><input type="radio" bind:group={settings.viewMode} value="browse" onchange={() => app.setViewMode('browse')} />浏览</label>
-      <label><input type="radio" bind:group={settings.viewMode} value="focus" onchange={() => app.setViewMode('focus')} />聚焦</label>
+      <div class="seg">
+        <label><input type="radio" bind:group={settings.viewMode} value="normal" onchange={() => app.setViewMode('normal')} /><span>正常</span></label>
+        <label><input type="radio" bind:group={settings.viewMode} value="browse" onchange={() => app.setViewMode('browse')} /><span>浏览</span></label>
+        <label><input type="radio" bind:group={settings.viewMode} value="focus" onchange={() => app.setViewMode('focus')} /><span>聚焦</span></label>
+      </div>
     </div>
   </section>
 
   <section>
     <h4>导出</h4>
-    <div class="row">
+    <div class="row btns">
       <button onclick={() => app.exportPng({ transparent: true, includeLaser: false })}>PNG（透明）</button>
       <button onclick={() => app.exportPng({ transparent: false, includeLaser: false })}>PNG（含背景）</button>
       <button onclick={() => app.exportSvg()}>SVG</button>
@@ -340,19 +372,21 @@
     width: 430px;
     max-height: calc(100% - 40px);
     overflow: auto;
-    padding: 12px 14px;
-    border-radius: 10px;
+    padding: 14px 16px;
+    border-radius: 12px;
     background: var(--background-primary, #fff);
     border: 1px solid var(--background-modifier-border, #ddd);
     box-shadow: 0 6px 24px rgba(0, 0, 0, 0.14);
     font-size: 12.5px;
+    color: var(--text-normal, #222);
   }
   .trefoil-settings-head {
     display: flex;
     justify-content: space-between;
     align-items: center;
     font-weight: 600;
-    margin-bottom: 6px;
+    font-size: 13px;
+    margin-bottom: 8px;
     cursor: move;
     user-select: none;
   }
@@ -363,11 +397,11 @@
     color: var(--text-muted, #777);
   }
   section {
-    padding: 8px 0;
+    padding: 10px 0 6px;
     border-top: 1px solid var(--background-modifier-border, #eee);
   }
   h4 {
-    margin: 0 0 6px;
+    margin: 0 0 8px;
     font-size: 12px;
     color: var(--text-muted, #777);
     font-weight: 600;
@@ -377,15 +411,18 @@
     align-items: center;
     flex-wrap: wrap;
     gap: 8px;
-    margin: 5px 0;
+    margin: 7px 0;
   }
+  /* 统一 76px 标签列：各行控件左缘对齐，长标签（百分比步进等）也不折行 */
   .row > span:first-child {
-    width: 58px;
-    color: var(--text-muted, #777);
     flex: none;
+    width: 76px;
+    color: var(--text-muted, #777);
+    white-space: nowrap;
   }
-  .trefoil-wide-label > span:first-child {
-    width: 68px;
+  .row .mid {
+    flex: none;
+    color: var(--text-muted, #777);
     white-space: nowrap;
   }
   .trefoil-hint {
@@ -399,6 +436,7 @@
     color: var(--text-muted, #777);
     font-size: 11px;
     min-width: 34px;
+    text-align: right;
   }
   label {
     display: inline-flex;
@@ -406,6 +444,115 @@
     gap: 3px;
     white-space: nowrap;
   }
+
+  /* 分段式单选（模式/形状/延迟/样式/步进/查看）：input 透明铺满 label，选中态画在相邻 span 上 */
+  .seg {
+    flex: 1;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--background-secondary, #f2f3f5);
+  }
+  .seg label {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    display: block;
+    cursor: pointer;
+  }
+  .seg input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+  .seg span {
+    display: block;
+    padding: 3px 4px;
+    border-radius: 5px;
+    text-align: center;
+    color: var(--text-muted, #777);
+    transition: background 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
+  }
+  .seg label:hover input:not(:checked) + span {
+    color: var(--text-normal, #222);
+  }
+  .seg input:checked + span {
+    background: var(--background-primary, #fff);
+    color: var(--text-normal, #222);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), 0 0 0 1px var(--background-modifier-border, #e2e2e2);
+  }
+  .seg input:focus-visible + span {
+    outline: 2px solid var(--interactive-accent, #4c8dff);
+    outline-offset: 1px;
+  }
+
+  /* 日间/夜间成对色块 */
+  .pair {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .pair label {
+    gap: 6px;
+    cursor: pointer;
+  }
+  .pair label span {
+    color: var(--text-muted, #777);
+    font-size: 11px;
+  }
+
+  /* 吸附开关：input 透明覆盖在轨道上（保持可聚焦/可点），视觉全在 .track 上 */
+  .tgl {
+    position: relative;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .tgl input {
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 26px;
+    height: 15px;
+    margin: 0;
+    transform: translateY(-50%);
+    opacity: 0;
+    cursor: pointer;
+  }
+  .tgl .track {
+    position: relative;
+    flex: none;
+    width: 26px;
+    height: 15px;
+    border-radius: 8px;
+    background: var(--background-modifier-border, #ccc);
+    transition: background 0.15s ease;
+  }
+  .tgl .track::after {
+    content: '';
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+  }
+  .tgl input:checked ~ .track {
+    background: var(--interactive-accent, #4c8dff);
+  }
+  .tgl input:checked ~ .track::after {
+    transform: translateX(11px);
+  }
+  .tgl input:focus-visible ~ .track {
+    outline: 2px solid var(--interactive-accent, #4c8dff);
+    outline-offset: 2px;
+  }
+
   input[type='range'] {
     flex: 1;
     min-width: 70px;
@@ -413,12 +560,12 @@
   }
   /* 原生取色器：Chromium 新版会把色块画成圆形，这里改写伪元素压成圆角方 */
   input[type='color'] {
-    width: 22px;
-    height: 22px;
+    width: 24px;
+    height: 24px;
     flex: none;
     padding: 0;
     border: 1px solid var(--background-modifier-border, #ddd);
-    border-radius: 5px;
+    border-radius: 6px;
     background: var(--background-primary, #fff);
     cursor: pointer;
     overflow: hidden;
@@ -444,19 +591,20 @@
     border-radius: 4px;
   }
   input[type='number'] {
-    flex: 1;
-    min-width: 0;
-    padding: 3px 6px;
+    flex: 0 0 52px;
+    width: 52px;
+    padding: 3px 2px;
     border: 1px solid var(--background-modifier-border, #ddd);
     border-radius: 5px;
     background: var(--background-primary, #fff);
     color: var(--text-normal, #222);
     font-size: 12px;
+    text-align: center;
   }
   button {
-    padding: 4px 10px;
+    padding: 4px 12px;
     border: 1px solid var(--background-modifier-border, #ddd);
-    border-radius: 5px;
+    border-radius: 6px;
     background: var(--background-primary, #fff);
     color: var(--text-normal, #222);
     font-size: 12px;
@@ -464,5 +612,8 @@
   }
   button:hover {
     background: var(--background-modifier-hover, #eee);
+  }
+  .btns button {
+    flex: 1;
   }
 </style>

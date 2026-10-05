@@ -4,6 +4,7 @@ import { parseDoc, serializeDoc } from '../data/jsonCanvas';
 import type { CanvasDoc, CanvasEdge, CanvasNode } from './types';
 import { uid } from './id';
 import { unionRect, type Rect } from './geometry';
+import { CONTAINER_DEFAULT_WRAP_PAD } from './defaults';
 
 export class Clipboard {
   private data: CanvasDoc | null = null;
@@ -95,10 +96,11 @@ export class Clipboard {
       doc.nodes.push({
         id: containerId,
         type: 'trefoil/container',
-        x: box!.x - 32,
-        y: box!.y - 32,
-        width: box!.width + 64,
-        height: box!.height + 64,
+        // 外边距 = 包裹模式默认内边距：组合出的容器开启包裹模式时几何不跳变
+        x: box!.x - CONTAINER_DEFAULT_WRAP_PAD,
+        y: box!.y - CONTAINER_DEFAULT_WRAP_PAD,
+        width: box!.width + CONTAINER_DEFAULT_WRAP_PAD * 2,
+        height: box!.height + CONTAINER_DEFAULT_WRAP_PAD * 2,
       });
       for (const n of nodes) {
         n.containerId = containerId;

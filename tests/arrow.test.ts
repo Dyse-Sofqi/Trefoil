@@ -1,5 +1,5 @@
 /** 箭头端点样式：几何、命中容差与序列化 */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // konva 的 node 入口依赖原生 canvas 包，本测试只走几何/数据层，直接替换成空壳
 vi.mock('konva', () => ({ default: {} }));
@@ -7,12 +7,12 @@ vi.mock('konva', () => ({ default: {} }));
 import { arrowHeadParts, headLength, headRadius } from '../src/engine/arrowHead';
 import { hitTestNode } from '../src/engine/NodeView';
 import type { Palette } from '../src/engine/palette';
-import type { CanvasNode } from '../src/core/types';
+import type { CanvasNode, Side } from '../src/core/types';
 import { parseDoc, serializeDoc } from '../src/data/jsonCanvas';
 import { DEFAULT_SETTINGS, mergeSettings } from '../src/core/defaults';
 import { bakeLineFlip, normalizeLineBBox, setLinePoint } from '../src/core/resize';
 import { shapeRectFromDrag, bezierPath } from '../src/core/geometry';
-import { effectiveEndpoints, isBoundCurve, arrowCurve, sampleCubic, magnetAnchor, syncBoundArrow, trimCubicEnd, trimCubicStart, cubicMidpoint, polylineMidpoint, dashArray, isLinkableTarget, lineHitsRect, MAGNET_PX, freezeBoundArrow } from '../src/core/arrowLink';
+import { effectiveEndpoints, isBoundCurve, arrowCurve, sampleCubic, magnetAnchor, syncBoundArrow, trimCubicEnd, trimCubicStart, cubicMidpoint, polylineMidpoint, dashArray, isLinkableTarget, lineHitsRect, linePolyline, MAGNET_PX, freezeBoundArrow, setBoundArrowShape, setEndpointMode, isManualEndpoints, effectiveEndpointMode } from '../src/core/arrowLink';
 import { Document } from '../src/core/Document';
 
 const palette = {} as Palette;
@@ -772,5 +772,413 @@ describe('形状辅助键拖拽（shapeRectFromDrag，PS 规范）', () => {
   it('Shift+Alt：中心正形', () => {
     // 拖 80×50 → 边长 160 的正方形，中心 (100,100)
     expect(shapeRectFromDrag(S, { x: 180, y: 150 }, true, true)).toEqual({ x: 20, y: 20, width: 160, height: 160 });
+  });
+});
+
+describe('连线形态设置（boundShape：曲线/直线全局切换）', () => {
+  // 全局形态是运行时状态：本组每个用例结束后必须还原为默认曲线，避免污染其他用例
+  afterEach(() => {
+    setBoundArrowShape('curve');
+  });
+
+  const rectNode = (id: string, x: number, y: number): CanvasNode => ({
+    id,
+    type: 'text',
+    x,
+    y,
+    width: 100,
+    height: 60,
+    text: id,
+  });
+  const boundArrow = (fromNode?: string, toNode?: string): CanvasNode => ({
+    id: 'nbs',
+    type: 'trefoil/shape',
+    shape: 'arrow',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    points: [[0, 0], [100, 100]],
+    fromNode,
+    toNode,
+  });
+  // 右上错位相对的两个元素：锚点为 f 右缘中点 (100,30) 与 t 左缘中点 (200,-130)，出边法线与弦向夹角大
+  const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 200, -160) : undefined);
+
+  it('setBoundArrowShape：值变化才返回 true', () => {
+    expect(setBoundArrowShape('line')).toBe(true);
+    expect(setBoundArrowShape('line')).toBe(false);
+    expect(setBoundArrowShape('curve')).toBe(true);
+  });
+
+  it('直线形态：arrowCurve 返回 null、isBoundCurve false，但绑定字段保留', () => {
+    const n = boundArrow('f', 't');
+    expect(arrowCurve(n, get)).not.toBeNull(); // 默认曲线
+    setBoundArrowShape('line');
+    expect(arrowCurve(n, get)).toBeNull();
+    expect(isBoundCurve(n, get)).toBe(false);
+    expect(n.fromNode).toBe('f');
+    expect(n.toNode).toBe('t');
+  });
+
+  it('直线形态：syncBoundArrow 包围盒收紧到两端锚点的弦（不再包曲线控制点）', () => {
+    const n = boundArrow('f', 't');
+    syncBoundArrow(n, get);
+    setBoundArrowShape('line');
+    syncBoundArrow(n, get);
+    // 折点仍是两端锚点（端点随元素移动语义不变），包围盒退化为弦
+    expect(n.points).toHaveLength(2);
+    expect(n.x).toBe(100);
+    expect(n.y).toBe(-130);
+    expect(n.width).toBe(100);
+    expect(n.height).toBe(160);
+    expect(n.x + n.points![0]![0]!).toBeCloseTo(100);
+    expect(n.y + n.points![0]![1]!).toBeCloseTo(30);
+    expect(n.x + n.points![1]![0]!).toBeCloseTo(200);
+    expect(n.y + n.points![1]![1]!).toBeCloseTo(-130);
+  });
+
+  it('直线形态：命中/框选按直线判定，切回曲线恢复贝塞尔几何', () => {
+    const n = boundArrow('f', 't');
+    syncBoundArrow(n, get);
+    // 取曲线上偏离弦最远的采样点：曲线形态下是实体，直线形态下是空白
+    const curve = arrowCurve(n, get)!;
+    const s = sampleCubic(curve.path, 48);
+    const [ax, ay] = [curve.path[0]!, curve.path[1]!];
+    const [bx, by] = [curve.path[6]!, curve.path[7]!];
+    const len = Math.hypot(bx - ax, by - ay);
+    let px = 0;
+    let py = 0;
+    let maxOff = 0;
+    for (let i = 0; i + 1 < s.length; i += 2) {
+      const off = Math.abs((s[i]! - ax) * (by - ay) - (s[i + 1]! - ay) * (bx - ax)) / len;
+      if (off > maxOff) {
+        maxOff = off;
+        px = s[i]!;
+        py = s[i + 1]!;
+      }
+    }
+    expect(maxOff).toBeGreaterThan(8); // 曲线确实弯离了弦，判据有效
+    expect(lineHitsRect(n, { x: px - 3, y: py - 3, width: 6, height: 6 }, get)).toBe(true);
+
+    setBoundArrowShape('line');
+    syncBoundArrow(n, get);
+    // 折线退化为两端锚点直线：曲线弯出处不再算实体，弦上点必命中
+    expect(linePolyline(n, get)).toHaveLength(2);
+    expect(lineHitsRect(n, { x: px - 3, y: py - 3, width: 6, height: 6 }, get)).toBe(false);
+    expect(lineHitsRect(n, { x: 145, y: -55, width: 10, height: 10 }, get)).toBe(true);
+
+    // 切回曲线：几何恢复为贝塞尔采样
+    setBoundArrowShape('curve');
+    expect(linePolyline(n, get).length).toBeGreaterThan(2);
+    expect(lineHitsRect(n, { x: px - 3, y: py - 3, width: 6, height: 6 }, get)).toBe(true);
+  });
+});
+
+describe('端点手动模式（endpointMode：锁定磁吸边，不自动绕边）', () => {
+  // 端点模式是运行时状态：本组每个用例结束后还原为默认智能，避免污染其他用例
+  afterEach(() => {
+    setEndpointMode('smart');
+  });
+
+  const rectNode = (id: string, x: number, y: number): CanvasNode => ({ id, type: 'text', x, y, width: 100, height: 60, text: id });
+  // f(0,0) 在左、t(300,0) 在右：智能推断 fromSide=right / toSide=left
+  const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 300, 0) : undefined);
+  const boundArrow = (sides?: { fromSide?: Side; toSide?: Side }): CanvasNode => ({
+    id: 'na',
+    type: 'trefoil/shape',
+    shape: 'arrow',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    points: [[0, 0], [100, 100]],
+    fromNode: 'f',
+    toNode: 't',
+    ...sides,
+  });
+
+  it('setEndpointMode：值变化才返回 true，isManualEndpoints 同步', () => {
+    expect(isManualEndpoints()).toBe(false);
+    expect(setEndpointMode('manual')).toBe(true);
+    expect(isManualEndpoints()).toBe(true);
+    expect(setEndpointMode('manual')).toBe(false);
+    expect(setEndpointMode('smart')).toBe(true);
+  });
+
+  it('双端绑定：手动模式按锁定边取锚点（同侧相连），智能模式忽略锁定边按方位推断', () => {
+    setEndpointMode('manual');
+    const n = boundArrow({ fromSide: 'left', toSide: 'left' });
+    const { a, b } = effectiveEndpoints(n, get);
+    expect(a).toEqual({ x: 0, y: 30 }); // f 左缘中点（智能推断会给右缘 100,30）
+    expect(b).toEqual({ x: 300, y: 30 }); // t 左缘中点（智能推断同为左缘，此处验证不被方位改写）
+    setEndpointMode('smart');
+    const smart = effectiveEndpoints(n, get);
+    expect(smart.a).toEqual({ x: 100, y: 30 });
+    expect(smart.b).toEqual({ x: 300, y: 30 });
+  });
+
+  it('双端绑定：手动模式 arrowCurve 与 effectiveEndpoints 选边同源', () => {
+    setEndpointMode('manual');
+    const n = boundArrow({ fromSide: 'top', toSide: 'bottom' });
+    const curve = arrowCurve(n, get)!;
+    const { a, b } = effectiveEndpoints(n, get);
+    expect(curve.path[0]).toBe(a.x);
+    expect(curve.path[1]).toBe(a.y);
+    expect(curve.path[6]).toBe(b.x);
+    expect(curve.path[7]).toBe(b.y);
+    expect(a).toEqual({ x: 50, y: 0 });
+    expect(b).toEqual({ x: 350, y: 60 });
+  });
+
+  it('单端绑定：手动模式锚点固定在锁定边，自由端移动不再牵动绑定端', () => {
+    setEndpointMode('manual');
+    const n = boundArrow({ fromSide: 'left' });
+    n.toNode = undefined;
+    n.toSide = undefined;
+    n.points = [[0, 0], [200, 300]];
+    const e1 = effectiveEndpoints(n, get);
+    expect(e1.a).toEqual({ x: 0, y: 30 }); // 智能模式会绕到朝向自由端的右缘 100,30
+    n.points = [[0, 0], [400, 300]];
+    expect(effectiveEndpoints(n, get).a).toEqual(e1.a);
+  });
+
+  it('单端绑定：智能模式忽略残留锁定边，恢复按自由端方位自动绕边（切回智能的回归）', () => {
+    // 手动模式锁定的边在切回智能后成为残留字段，不得再参与选边
+    const n = boundArrow({ fromSide: 'left', toSide: 'left' });
+    n.toNode = undefined;
+    n.points = [[0, 0], [500, 200]]; // 自由端在右下，距 f 底缘最近 → 绕到底缘 50,60
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 50, y: 60 });
+    n.points = [[0, 0], [500, -100]]; // 自由端在右上，距 f 顶缘最近 → 绕到顶缘 50,0
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 50, y: 0 });
+    n.points = [[0, 0], [129, 30]]; // 自由端紧贴 f 右缘（29 < 顶缘 30）→ 绕到右缘 100,30
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 100, y: 30 });
+  });
+
+  it('手动模式缺省锁定边回退智能推断（旧文件兼容），渲染同步时补齐固化', () => {
+    setEndpointMode('manual');
+    const n = boundArrow();
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 100, y: 30 }); // 回退推断
+    syncBoundArrow(n, get);
+    expect(n.fromSide).toBe('right');
+    expect(n.toSide).toBe('left');
+    // 补齐后锚点被锁定：移动自由端一侧的元素不再改变选边
+    const { a } = effectiveEndpoints(n, get);
+    expect(a).toEqual({ x: 100, y: 30 });
+  });
+
+  it('智能模式渲染同步不写锁定边（保持数据干净）', () => {
+    const n = boundArrow();
+    syncBoundArrow(n, get);
+    expect(n.fromSide).toBeUndefined();
+    expect(n.toSide).toBeUndefined();
+  });
+
+  it('磁吸返回被吸附的边（手动模式写入锁定边的依据）', () => {
+    const right = magnetAnchor(95, 30, 50, [rectNode('f', 0, 0)], () => true);
+    expect(right?.side).toBe('right');
+    expect(right?.x).toBe(100);
+    expect(right?.y).toBe(30);
+    const left = magnetAnchor(5, 30, 50, [rectNode('f', 0, 0)], () => true);
+    expect(left?.side).toBe('left');
+    expect(left?.x).toBe(0);
+  });
+
+  it('序列化：锁定边走 trefoil: 前缀并完整往返', () => {
+    const json = serializeDoc({ nodes: [boundArrow({ fromSide: 'top', toSide: 'bottom' })], edges: [] });
+    expect(json).toContain('"trefoil:fromSide": "top"');
+    expect(json).toContain('"trefoil:toSide": "bottom"');
+    const parsed = parseDoc(json);
+    expect(parsed.nodes[0]?.fromSide).toBe('top');
+    expect(parsed.nodes[0]?.toSide).toBe('bottom');
+  });
+
+  it('端点拖离绑定元素的撤销/重做：undo 还原绑定与锁定边，redo 重新解绑', () => {
+    const doc = new Document();
+    const cmds: unknown[] = [];
+    doc.history = { push: (c) => cmds.push(c) };
+    const n = Document.newNode({
+      type: 'trefoil/shape',
+      shape: 'arrow',
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+      points: [[0, 0], [100, 100]],
+      fromNode: 'f',
+      fromSide: 'left',
+    });
+    doc.addNodes([n]);
+    // 模拟拖绑定端：先解绑（SelectTool 按下），改折点，落栈（rec = 拖拽前快照）
+    n.fromNode = undefined;
+    n.fromSide = undefined;
+    setLinePoint(n, 0, 300, 0);
+    doc.commitPositions('调整箭头', new Map([[n.id, { x: 0, y: 0 }]]), new Map([
+      [n.id, { x: 0, y: 0, width: 100, height: 100, points: [[0, 0], [100, 100]], fromNode: 'f', fromSide: 'left' }],
+    ]));
+    const cmd = cmds[cmds.length - 1] as { undo(): void; redo(): void };
+    cmd.undo();
+    expect(n.fromNode).toBe('f');
+    expect(n.fromSide).toBe('left');
+    cmd.redo();
+    expect(n.fromNode).toBeUndefined();
+    expect(n.fromSide).toBeUndefined();
+  });
+});
+
+describe('端点模式按元素覆盖（node.endpointMode > 全局）', () => {
+  afterEach(() => {
+    setEndpointMode('smart');
+  });
+
+  const rectNode = (id: string, x: number, y: number): CanvasNode => ({ id, type: 'text', x, y, width: 100, height: 60, text: id });
+  const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 300, 0) : undefined);
+  const boundArrow = (patch: Partial<CanvasNode> = {}): CanvasNode => ({
+    id: 'nc',
+    type: 'trefoil/shape',
+    shape: 'arrow',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    points: [[0, 0], [100, 100]],
+    fromNode: 'f',
+    toNode: 't',
+    ...patch,
+  });
+
+  it('effectiveEndpointMode：未设置跟随全局，设置后覆盖全局', () => {
+    const n = boundArrow();
+    expect(effectiveEndpointMode(n)).toBe('smart'); // 全局默认
+    setEndpointMode('manual');
+    expect(effectiveEndpointMode(n)).toBe('manual'); // 未设置 → 跟随全局
+    n.endpointMode = 'smart';
+    expect(effectiveEndpointMode(n)).toBe('smart'); // 节点覆盖优先
+    n.endpointMode = 'manual';
+    setEndpointMode('smart');
+    expect(effectiveEndpointMode(n)).toBe('manual');
+  });
+
+  it('节点 manual + 全局 smart：双端绑定按锁定边取锚点（同侧相连）', () => {
+    const n = boundArrow({ endpointMode: 'manual', fromSide: 'left', toSide: 'left' });
+    const { a, b } = effectiveEndpoints(n, get);
+    expect(a).toEqual({ x: 0, y: 30 });
+    expect(b).toEqual({ x: 300, y: 30 });
+  });
+
+  it('节点 manual + 全局 smart：渲染同步补齐缺省锁定边', () => {
+    const n = boundArrow({ endpointMode: 'manual' });
+    syncBoundArrow(n, get);
+    expect(n.fromSide).toBe('right'); // 按当时方位冻结
+    expect(n.toSide).toBe('left');
+  });
+
+  it('节点 smart + 全局 manual：忽略残留锁定边按方位推断，渲染同步不写边', () => {
+    setEndpointMode('manual');
+    const n = boundArrow({ endpointMode: 'smart', fromSide: 'left', toSide: 'left' });
+    const { a } = effectiveEndpoints(n, get);
+    expect(a).toEqual({ x: 100, y: 30 }); // 智能推断 f 右缘，而非锁定的左缘
+    syncBoundArrow(n, get);
+    expect(n.fromSide).toBe('left'); // 字段保留但不参与选边
+    expect(n.toSide).toBe('left');
+  });
+
+  it('节点 manual：单端绑定锚点锁定，自由端移动不牵动绑定端', () => {
+    const n = boundArrow({ endpointMode: 'manual', fromSide: 'top' });
+    n.toNode = undefined;
+    n.toSide = undefined;
+    n.points = [[0, 0], [200, 300]];
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 50, y: 0 }); // 锁定 f 顶缘
+    n.points = [[0, 0], [400, 300]];
+    expect(effectiveEndpoints(n, get).a).toEqual({ x: 50, y: 0 });
+  });
+
+  it('序列化：节点覆盖走 trefoil:endpointMode 并完整往返', () => {
+    const json = serializeDoc({ nodes: [boundArrow({ endpointMode: 'manual' })], edges: [] });
+    expect(json).toContain('"trefoil:endpointMode": "manual"');
+    const parsed = parseDoc(json);
+    expect(parsed.nodes[0]?.endpointMode).toBe('manual');
+    // 未设置覆盖的节点不落盘
+    const plain = serializeDoc({ nodes: [boundArrow()], edges: [] });
+    expect(plain).not.toContain('endpointMode');
+  });
+});
+
+describe('连接形态每元素覆盖（node.boundShape > 全局）', () => {
+  afterEach(() => {
+    setBoundArrowShape('curve');
+  });
+
+  const rectNode = (id: string, x: number, y: number): CanvasNode => ({
+    id,
+    type: 'text',
+    x,
+    y,
+    width: 100,
+    height: 60,
+    text: id,
+  });
+  const boundArrow = (boundShape?: 'curve' | 'line'): CanvasNode => ({
+    id: 'nover',
+    type: 'trefoil/shape',
+    shape: 'arrow',
+    x: 0,
+    y: 0,
+    width: 100,
+    height: 100,
+    points: [[0, 0], [100, 100]],
+    fromNode: 'f',
+    toNode: 't',
+    boundShape,
+  });
+  const get = (id: string) => (id === 'f' ? rectNode('f', 0, 0) : id === 't' ? rectNode('t', 300, 100) : undefined);
+
+  it('节点覆盖 line：全局曲线时该箭头仍是直线，其他箭头不受影响', () => {
+    const overridden = boundArrow('line');
+    const follower = boundArrow(undefined);
+    expect(arrowCurve(overridden, get)).toBeNull();
+    expect(isBoundCurve(overridden, get)).toBe(false);
+    expect(linePolyline(overridden, get)).toHaveLength(2);
+    // 未覆盖的另一条跟随全局，仍是曲线
+    expect(arrowCurve(follower, get)).not.toBeNull();
+    expect(linePolyline(follower, get).length).toBeGreaterThan(2);
+    // 覆盖字段保留（切全局不影响覆盖者的绑定）
+    expect(overridden.fromNode).toBe('f');
+    expect(overridden.boundShape).toBe('line');
+  });
+
+  it('节点覆盖 curve：全局切直线后，被覆盖的箭头仍是曲线', () => {
+    setBoundArrowShape('line');
+    const overridden = boundArrow('curve');
+    const follower = boundArrow(undefined);
+    expect(arrowCurve(overridden, get)).not.toBeNull();
+    expect(isBoundCurve(overridden, get)).toBe(true);
+    expect(arrowCurve(follower, get)).toBeNull();
+    // 覆盖者按曲线同步：包围盒与采样曲线同源
+    syncBoundArrow(overridden, get);
+    const curve = arrowCurve(overridden, get)!;
+    expect(overridden.x + overridden.points![0]![0]!).toBeCloseTo(curve.path[0]!);
+    expect(overridden.y + overridden.points![0]![1]!).toBeCloseTo(curve.path[1]!);
+  });
+
+  it('覆盖为 undefined（跟随全局）：随全局切换而切换', () => {
+    const n = boundArrow(undefined);
+    expect(arrowCurve(n, get)).not.toBeNull();
+    setBoundArrowShape('line');
+    expect(arrowCurve(n, get)).toBeNull();
+    setBoundArrowShape('curve');
+    expect(arrowCurve(n, get)).not.toBeNull();
+  });
+
+  it('序列化：覆盖写 trefoil:boundShape，未覆盖不落盘；回读还原', () => {
+    const overridden = boundArrow('line');
+    const follower = boundArrow(undefined);
+    const json = serializeDoc({ nodes: [overridden, follower], edges: [] });
+    const raw = JSON.parse(json) as { nodes: Record<string, unknown>[] };
+    expect(raw.nodes[0]!['trefoil:boundShape']).toBe('line');
+    expect(raw.nodes[1]!['trefoil:boundShape']).toBeUndefined();
+    const parsed = parseDoc(json);
+    expect(parsed.nodes[0]!.boundShape).toBe('line');
+    expect(parsed.nodes[1]!.boundShape).toBeUndefined();
   });
 });

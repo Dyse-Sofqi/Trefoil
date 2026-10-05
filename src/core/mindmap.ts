@@ -10,6 +10,7 @@
 import { Document } from './Document';
 import type { CanvasNode } from './types';
 import { uid } from './id';
+import { fitWrapAround } from './wrap';
 
 /** 新建导图节点的文字样式（调用方按参考节点/全局文本默认解析好传入） */
 export interface MapNodeStyle {
@@ -111,6 +112,8 @@ export function addMapChild(doc: Document, parentId: string, style: MapNodeStyle
     doc.nodes.push(node);
     doc.edges.push({ id: uid('e'), fromNode: parentId, toNode: node.id, kind: 'mindmap' });
     doc.reindex();
+    // 所在容器为包裹模式时随新节点贴合（并入同一条撤销记录）
+    fitWrapAround(doc, [node.id]);
   });
   return node.id;
 }
@@ -143,6 +146,7 @@ export function addMapSibling(doc: Document, nodeId: string, style: MapNodeStyle
     doc.nodes.push(node);
     doc.edges.push({ id: uid('e'), fromNode: parentId, toNode: node.id, kind: 'mindmap' });
     doc.reindex();
+    fitWrapAround(doc, [node.id]);
   });
   return node.id;
 }

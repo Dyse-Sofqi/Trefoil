@@ -1,4 +1,4 @@
-import type { CanvasNode } from './types';
+import type { CanvasNode, Side } from './types';
 import { isContainerNode } from './types';
 
 export interface Rect {
@@ -163,6 +163,16 @@ export function pointsBBox(points: number[][]): Rect {
     maxY = Math.max(maxY, py);
   }
   return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+}
+
+/** 点相对矩形四边的最近边（到四边垂直距离取最小；同距时按 左/右/上/下 优先取一） */
+export function nearestRectSide(r: Rect, p: Vec): Side {
+  const dl = Math.abs(p.x - r.x);
+  const dr = Math.abs(p.x - (r.x + r.width));
+  const dt = Math.abs(p.y - r.y);
+  const db = Math.abs(p.y - (r.y + r.height));
+  const min = Math.min(dl, dr, dt, db);
+  return min === dl ? 'left' : min === dr ? 'right' : min === dt ? 'top' : 'bottom';
 }
 
 /** 矩形某一边上的锚点（连线 Ports） */

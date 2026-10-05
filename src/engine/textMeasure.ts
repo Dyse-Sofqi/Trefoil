@@ -67,7 +67,7 @@ function runItalic(r: Run): boolean {
 /** 分词：英文按单词，CJK 按字符 */
 function tokenize(text: string, run: Run): { text: string; run: Run }[] {
   const tokens: { text: string; run: Run }[] = [];
-  const re = /[\u2E80-\u9FFF\uF900-\uFAFF\uFF01-\uFF60\u3000-\u303F]|[\w#$%^&*()\-+=\[\]{};:'",.<>/?\\|`~!@]+\s*|\s+/gu;
+  const re = /[\u2E80-\u9FFF\uF900-\uFAFF\uFF01-\uFF60\u3000-\u303F]|[\w#$%^&*()\-+=[\]{};:'",.<>/?\\|`~!@]+\s*|\s+/gu;
   for (const m of text.match(re) ?? []) tokens.push({ text: m, run });
   if (!tokens.length && text) tokens.push({ text, run });
   return tokens;

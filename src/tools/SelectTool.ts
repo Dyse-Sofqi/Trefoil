@@ -1,22 +1,23 @@
 /**
  * 选择工具：点击/框选/拖拽移动、8 向缩放手柄、容器边带拖拽（整体移动）、
- * 双击空白创建文本、双击文本进入编辑。拖拽时应用吸附与智能参考线。
+ * 双击空白创建文本、双击文本/闭合图形进入编辑。拖拽时应用吸附与智能参考线。
  */
 import { Tool, type PointerEvt } from './types';
 import { Document, type ResizeStartRecord } from '../core/Document';
 import { nodeRect, rectFromPoints, rectCenter, normalizeRect, normalizeRotation, unionRect, inferSides, sideAnchors, type Rect, type Vec } from '../core/geometry';
-import { canRotate, isContainerNode, isFileNode, isLineLike } from '../core/types';
+import { canRotate, isClosedShape, isContainerNode, isFileNode, isLineLike } from '../core/types';
 import type { CanvasNode, Side } from '../core/types';
-import { snapMove, type Guide } from '../core/snap';
+import { snapMove, snapGridSpacing, type Guide } from '../core/snap';
 import { bakeLineFlip, resizeImageRect, setLinePoint } from '../core/resize';
-import { magnetAnchor, MAGNET_PX, isLinkableTarget, freezeBoundArrow, lineHitsRect } from '../core/arrowLink';
+import { magnetAnchor, MAGNET_PX, isLinkableTarget, effectiveEndpointMode, freezeBoundArrow, lineHitsRect } from '../core/arrowLink';
 import type { HandleId } from '../engine/Overlay';
 import { autoTextHeight } from '../engine/textMeasure';
 import { textBorderDefaults, textStyleDefaults } from '../core/defaults';
 import { isMapMember } from '../core/mindmap';
+import { fitWrapAround, wrapStartRecords, type GeometrySnapshot } from '../core/wrap';
 
 type Session =
-  | { type: 'move'; startW: Vec; starts: Map<string, { x: number; y: number }>; moved: boolean; bound: Map<string, ResizeStartRecord> }
+  | { type: 'move'; startW: Vec; starts: Map<string, { x: number; y: number }>; moved: boolean; bound: Map<string, ResizeStartRecord>; wrap: Map<string, GeometrySnapshot> }
   | {
       type: 'resize';
       handle: HandleId;
@@ -27,9 +28,11 @@ type Session =
       startPoints: number[][];
       startFlipX: boolean;
       startFlipY: boolean;
+      wrap: Map<string, GeometrySnapshot>;
     }
-  /** 线类端点拖拽：直接改折点（包围盒随 setLinePoint 重排）；拖绑定端会解除该端绑定 */
-  | { type: 'point'; startW: Vec; nodeId: string; index: number; startPos: { x: number; y: number }; startSize: { width: number; height: number }; startPoints: number[][]; startFromNode?: string; startToNode?: string }
+  /** 线类端点拖拽：直接改折点（包围盒随 setLinePoint 重排）；拖绑定端会解除该端绑定。
+   *  绑定快照用 null 表示"拖拽前无绑定"（区别于 undefined = 未跟踪），撤销/重做才能还原解绑。 */
+  | { type: 'point'; startW: Vec; nodeId: string; index: number; startPos: { x: number; y: number }; startSize: { width: number; height: number }; startPoints: number[][]; startFromNode?: string; startToNode?: string; startFromSide?: Side | null; startToSide?: Side | null; wrap: Map<string, GeometrySnapshot> }
   /** 连线（Edge）端点拖拽：把一端改连到其它元素（四向磁吸，拖拽中实时跟随目标） */
   | {
       type: 'edge-point';
@@ -49,6 +52,7 @@ type Session =
       nodeId: string;
       startPos: { x: number; y: number };
       startSize: { width: number; height: number };
+      wrap: Map<string, GeometrySnapshot>;
     }
   /** 旋转手柄拖拽：指针绕节点中心的极角变化量 → rotation（度），中心与尺寸不变 */
   | { type: 'rotate'; startW: Vec; nodeId: string; center: Vec; startAng: number; startRot: number; moved: boolean }
@@ -117,8 +121,18 @@ export class SelectTool extends Tool {
         // 拖绑定端 = 解除该端磁吸绑定（端点从此自由）；绑定快照必须在解绑前捕获
         const startFromNode = n.fromNode;
         const startToNode = n.toNode;
-        if (index === 0 && n.fromNode) doc.live(() => (n.fromNode = undefined));
-        if (index === (n.points?.length ?? 2) - 1 && n.toNode) doc.live(() => (n.toNode = undefined));
+        const startFromSide = n.fromSide ?? null;
+        const startToSide = n.toSide ?? null;
+        if (index === 0 && n.fromNode)
+          doc.live(() => {
+            n.fromNode = undefined;
+            n.fromSide = undefined;
+          });
+        if (index === (n.points?.length ?? 2) - 1 && n.toNode)
+          doc.live(() => {
+            n.toNode = undefined;
+            n.toSide = undefined;
+          });
         this.session = {
           type: 'point',
           startW: { x: e.wx, y: e.wy },
@@ -133,6 +147,10 @@ export class SelectTool extends Tool {
           ]).map((p) => [...p]),
           startFromNode,
           startToNode,
+          startFromSide,
+          startToSide,
+          // 涉及的包裹容器起始几何：拖拽中贴合容器，提交时并入同一条撤销记录
+          wrap: wrapStartRecords(doc, [n.id]),
         };
         return;
       }
@@ -145,6 +163,7 @@ export class SelectTool extends Tool {
           nodeId: n.id,
           startPos: { x: n.x, y: n.y },
           startSize: { width: n.width, height: n.height },
+          wrap: wrapStartRecords(doc, [n.id]),
         };
         return;
       }
@@ -158,6 +177,7 @@ export class SelectTool extends Tool {
         startPoints: n.points ? n.points.map((p) => [...p]) : [],
         startFlipX: !!n.flipX,
         startFlipY: !!n.flipY,
+        wrap: wrapStartRecords(doc, [n.id]),
       };
       return;
     }
@@ -247,7 +267,9 @@ export class SelectTool extends Tool {
         });
       }
     }
-    this.session = { type: 'move', startW: { x: e.wx, y: e.wy }, starts, moved: false, bound };
+    // 包裹容器随内容跟随：会话开始时已捕获其起始几何，拖拽中每帧贴合（内层先于外层），
+    // 松手时并入 starts/sizes 一起落撤销 —— 单独落记录会把一次拖拽拆成两步撤销
+    this.session = { type: 'move', startW: { x: e.wx, y: e.wy }, starts, moved: false, bound, wrap: wrapStartRecords(doc, starts.keys()) };
   }
 
   /**
@@ -305,7 +327,7 @@ export class SelectTool extends Tool {
     const others = doc.nodes.filter((n) => !selected.has(n.id) && !engine.isNodeHidden(n.id)).map((n) => nodeRect(n));
     let snap = { dx: 0, dy: 0, guides: [] as Guide[] };
     if (!e.alt && settings.snap.enabled && (settings.snap.objectSnap || settings.snap.gridSnap) && !e.ctrl) {
-      snap = snapMove(movingBox, others, settings.snap, engine.vp.scale, settings.background.gridSpacing);
+      snap = snapMove(movingBox, others, settings.snap, engine.vp.scale, snapGridSpacing(settings.background));
     }
 
     const dx = dx0 + snap.dx;
@@ -324,6 +346,8 @@ export class SelectTool extends Tool {
           n.y = start.y + dy;
         }
       }
+      // 包裹容器跟着内容走：元素向外拖，容器同步扩张保持内边距（内层先于外层）
+      if (s.wrap.size) fitWrapAround(doc, s.starts.keys());
     });
     this.guides = snap.guides;
     engine.overlayState.guides = snap.guides;
@@ -352,6 +376,7 @@ export class SelectTool extends Tool {
       n.y = r.y;
       n.width = r.width;
       n.height = r.height;
+      if (s.wrap.size) fitWrapAround(doc, [n.id]);
     });
     engine.applyOverlay();
   }
@@ -410,6 +435,8 @@ export class SelectTool extends Tool {
       if (points) n.points = points;
       if (flipX !== undefined) n.flipX = flipX;
       if (flipY !== undefined) n.flipY = flipY;
+      // 缩放容器内的子元素 → 容器跟随贴合
+      if (s.wrap.size) fitWrapAround(doc, [n.id]);
     });
     engine.applyOverlay();
   }
@@ -422,7 +449,10 @@ export class SelectTool extends Tool {
     if (Math.hypot(e.wx - s.startW.x, e.wy - s.startW.y) * this.ctx.engine.vp.scale < 3) return;
     const n = this.ctx.doc.getNode(s.nodeId);
     if (!n) return;
-    this.ctx.doc.live(() => setLinePoint(n, s.index, e.wx, e.wy));
+    this.ctx.doc.live(() => {
+      setLinePoint(n, s.index, e.wx, e.wy);
+      if (s.wrap.size) fitWrapAround(this.ctx.doc, [n.id]);
+    });
     // 磁吸提示：紧贴可连接元素时显示四向锚点 + 高亮当前会吸附到的那个锚点
     const other = s.index === 0 ? (n.toNode ?? null) : (n.fromNode ?? null);
     this.previewMagnet(e.wx, e.wy, other);
@@ -488,7 +518,7 @@ export class SelectTool extends Tool {
   }
 
   /** 端点磁吸（四向最近边）：exclude 为排除的元素 id（防自环/防重复绑定），过滤线类目标 */
-  private magnetTarget(wx: number, wy: number, exclude: string | Iterable<string> | null): { id: string; x: number; y: number } | null {
+  private magnetTarget(wx: number, wy: number, exclude: string | Iterable<string> | null): { id: string; x: number; y: number; side: Side } | null {
     const { engine, doc } = this.ctx;
     return magnetAnchor(wx, wy, MAGNET_PX / engine.vp.scale, doc.nodes, (id) => !engine.isNodeHidden(id), exclude);
   }
@@ -514,7 +544,16 @@ export class SelectTool extends Tool {
     if (!s) return;
     const { doc, engine } = this.ctx;
     if (s.type === 'move') {
-      if (s.moved) doc.commitPositions('移动', s.starts, s.bound.size ? s.bound : undefined);
+      if (s.moved) {
+        // 包裹容器的贴合几何并入本次拖拽的撤销记录：一次拖拽 = 一步撤销
+        const starts = new Map(s.starts);
+        const sizes = new Map(s.bound);
+        for (const [cid, rec] of s.wrap) {
+          if (!starts.has(cid)) starts.set(cid, { x: rec.x, y: rec.y });
+          sizes.set(cid, rec);
+        }
+        doc.commitPositions('移动', starts, sizes.size ? sizes : undefined);
+      }
       engine.overlayState.guides = [];
       engine.applyOverlay();
     } else if (s.type === 'point') {
@@ -525,17 +564,25 @@ export class SelectTool extends Tool {
         if (!moved && s.startFromNode && !n.fromNode) doc.live(() => (n.fromNode = s.startFromNode));
         if (!moved && s.startToNode && !n.toNode) doc.live(() => (n.toNode = s.startToNode));
         if (moved) {
-          // 重新链接：松手时端点靠近其它元素（四向磁吸）→ 绑定该端；否则保持自由端
+          // 重新链接：松手时端点靠近其它元素（四向磁吸）→ 绑定该端；否则保持自由端。
+          // 生效端点模式为手动（全局或节点覆盖）：磁吸选中的边一并写入节点，端点从此锁定在该边
           const twoPoint = n.shape === 'arrow' || n.shape === 'line';
           const last = (n.points?.length ?? 2) - 1;
           if (twoPoint && (s.index === 0 || s.index === last)) {
             const other = s.index === 0 ? (n.toNode ?? null) : (n.fromNode ?? null);
             const m = this.magnetTarget(e.wx, e.wy, other);
+            const lock = effectiveEndpointMode(n) === 'manual';
             if (m) {
               doc.live(() => {
-                if (s.index === 0) n.fromNode = m.id;
-                else n.toNode = m.id;
+                if (s.index === 0) {
+                  n.fromNode = m.id;
+                  n.fromSide = lock ? m.side : undefined;
+                } else {
+                  n.toNode = m.id;
+                  n.toSide = lock ? m.side : undefined;
+                }
                 setLinePoint(n, s.index, m.x, m.y);
+                if (s.wrap.size) fitWrapAround(doc, [n.id]);
               });
             }
           }
@@ -546,10 +593,18 @@ export class SelectTool extends Tool {
             width: s.startSize.width,
             height: s.startSize.height,
             points: s.startPoints,
-            fromNode: s.startFromNode,
-            toNode: s.startToNode,
+            // null = 拖拽前无绑定/未锁定：撤销/重做都能回到"无"，而非跳过
+            fromNode: s.startFromNode ?? null,
+            toNode: s.startToNode ?? null,
+            fromSide: s.startFromSide ?? null,
+            toSide: s.startToSide ?? null,
           };
-          doc.commitPositions('调整箭头', starts, new Map([[s.nodeId, rec]]));
+          const sizes = new Map<string, ResizeStartRecord>([[s.nodeId, rec]]);
+          for (const [cid, wrec] of s.wrap) {
+            starts.set(cid, { x: wrec.x, y: wrec.y });
+            sizes.set(cid, wrec);
+          }
+          doc.commitPositions('调整箭头', starts, sizes);
         }
       }
       engine.overlayState.ports = [];
@@ -606,16 +661,24 @@ export class SelectTool extends Tool {
           rec.flipX = s.startFlipX;
           rec.flipY = s.startFlipY;
         }
-        const sizes = new Map([[s.nodeId, rec]]);
+        const sizes = new Map<string, ResizeStartRecord>([[s.nodeId, rec]]);
+        for (const [cid, wrec] of s.wrap) {
+          starts.set(cid, { x: wrec.x, y: wrec.y });
+          sizes.set(cid, wrec);
+        }
         doc.commitPositions('调整大小', starts, sizes);
       }
     } else if (s.type === 'image-resize') {
       const n = doc.getNode(s.nodeId);
       if (n) {
         const starts = new Map([[s.nodeId, { x: s.startPos.x, y: s.startPos.y }]]);
-        const sizes = new Map([
+        const sizes = new Map<string, ResizeStartRecord>([
           [s.nodeId, { x: s.startPos.x, y: s.startPos.y, width: s.startSize.width, height: s.startSize.height }],
         ]);
+        for (const [cid, wrec] of s.wrap) {
+          starts.set(cid, { x: wrec.x, y: wrec.y });
+          sizes.set(cid, wrec);
+        }
         doc.commitPositions('调整大小', starts, sizes);
       }
     } else if (s.type === 'rotate') {
@@ -673,6 +736,9 @@ export class SelectTool extends Tool {
       } else if (isLineLike(n)) {
         // 双击线类形状（line/arrow/polyline）→ 编辑关系描述
         this.ctx.beginLabelEdit('node', n.id);
+      } else if (isClosedShape(n)) {
+        // 双击闭合图形（矩形/椭圆/菱形/三角）→ 编辑内嵌文字
+        this.ctx.beginTextEdit(n.id);
       }
       return;
     }
@@ -701,12 +767,19 @@ export class SelectTool extends Tool {
   onKey(e: KeyboardEvent): boolean {
     // 导图快捷键：Tab 添加子节点、Enter 添加同级节点（仅单选导图成员时接管，
     // 其余按键交还全局处理；PolylineTool 的 Enter 结束折线在更早的分发里已消费）
-    if (e.key !== 'Tab' && e.key !== 'Enter') return false;
     if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return false;
     const doc = this.ctx.doc;
     if (doc.selection.size !== 1) return false;
     const n = doc.selectedNodes()[0];
-    if (!n || !isMapMember(doc, n.id)) return false;
+    if (!n) return false;
+    // F2 / Enter：编辑选中闭合图形的内嵌文字（与双击同效；导图成员的 Enter 仍优先做同级节点）
+    if ((e.key === 'F2' || e.key === 'Enter') && !isMapMember(doc, n.id) && isClosedShape(n)) {
+      e.preventDefault();
+      this.ctx.beginTextEdit(n.id);
+      return true;
+    }
+    if (e.key !== 'Tab' && e.key !== 'Enter') return false;
+    if (!isMapMember(doc, n.id)) return false;
     const handled = e.key === 'Tab' ? this.ctx.mapAddChild(n.id) : this.ctx.mapAddSibling(n.id);
     if (!handled) return false;
     e.preventDefault();

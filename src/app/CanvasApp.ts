@@ -19,6 +19,8 @@ import { LaserTool, EraserTool } from '../tools/AnnotationTools';
 import { PanTool } from '../tools/PanTool';
 import { Clipboard, composeIntoContainer, decomposeContainer } from '../core/clipboard';
 import { writeNodesToSystemClipboard } from '../core/systemClipboard';
+import type { ResizeStartRecord } from '../core/Document';
+import { fitWrapAround, isWrapContainer, wrapBoxFor, wrapPadOf, wrapStartRecords, type GeometrySnapshot } from '../core/wrap';
 import { computeArrange, arrangeTargets, resolveRingCenter, type ArrangeParams } from '../core/arrange';
 import {
   addMapChild,
@@ -29,11 +31,11 @@ import {
 } from '../core/mindmap';
 import { exportPng, exportSvg } from '../exporter';
 import { bezierPath, inferSides, mindmapEdgeCurve, nodeRect, normalizeRotation, sideAnchor, type Rect } from '../core/geometry';
-import { arrowCurve, cubicMidpoint, polylineMidpoint } from '../core/arrowLink';
+import { arrowCurve, cubicMidpoint, polylineMidpoint, setBoundArrowShape, setEndpointMode } from '../core/arrowLink';
 import type { HostAdapter, DroppedImages } from './host';
 import { buildContextMenu } from './contextMenu';
 import { bumpRev, closeContextMenu, settings as uiSettings, ui, updateStatus } from './ui.svelte';
-import { canRotate, type CanvasEdge, type CanvasNode } from '../core/types';
+import { canRotate, isClosedShape, type CanvasEdge, type CanvasNode } from '../core/types';
 import { extensionForFile, pastedImageName } from '../core/attachment';
 import { isImageFileDrag } from '../core/dragDrop';
 
@@ -71,6 +73,10 @@ export class CanvasApp {
     Object.assign(uiSettings, JSON.parse(JSON.stringify(this.settings)));
     this.settings = uiSettings as TrefoilSettings;
     this.history.onChanged = () => bumpRev();
+    // 连线设置（双端绑定线形态 曲线/直线 + 端点模式 智能/手动）须在 Engine 首次渲染前
+    // 就位（几何核心读运行时全局）；手动端点模式的锁定边由渲染同步 syncBoundArrow 补齐
+    setBoundArrowShape(this.settings.link.boundShape);
+    setEndpointMode(this.settings.link.endpointMode);
   }
 
   static async create(container: HTMLElement, adapter: HostAdapter, initial?: Partial<TrefoilSettings>): Promise<CanvasApp> {
@@ -237,15 +243,25 @@ export class CanvasApp {
       this.engine.render();
       return;
     }
+    // 闭合图形：文字内嵌在形状里，几何不随内容伸缩；清空只清文字、不删形状
+    if (isClosedShape(n)) {
+      this.doc.updateNode(nodeId, { text: text.trim() ? text : undefined }, text.trim() ? '编辑文本' : '清除图形文字');
+      this.engine.render();
+      return;
+    }
     // 空内容退出编辑 → 自动删除该元素
     if (!text.trim()) {
       this.doc.removeNodes([nodeId]);
       return;
     }
-    // 宽高都贴合内容：宽度取最宽行（超上限才折行），高度按该宽度重排
+    // 宽高都贴合内容：宽度取最宽行（超上限才折行），高度按该宽度重排；
+    // 包裹容器在同一 mutate 内贴合，文本编辑 = 一步撤销
     const width = autoTextWidth(text, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
     const height = autoTextHeight(text, width, n.fontSize ?? 16, n.fontFamily ?? 'system-ui, sans-serif', n.fontWeight ?? 400);
-    this.doc.updateNode(nodeId, { text, width, height }, '编辑文本');
+    this.doc.mutate('编辑文本', () => {
+      Object.assign(n, { text, width, height });
+      fitWrapAround(this.doc, [nodeId]);
+    });
     // 文本未变化时 mutate 不发 changed 事件，仍需结束编辑态的隐藏并重渲染
     this.engine.render();
   }
@@ -409,7 +425,7 @@ export class CanvasApp {
       height: 240,
     });
     this.doc.addNodes([node]);
-    this.loadFileNodeMetrics(node);
+    void this.loadFileNodeMetrics(node);
     return node.id;
   }
 
@@ -534,6 +550,8 @@ export class CanvasApp {
 
   /** 进行中的排列会话：起点快照（撤销 / 重作用），停顿后经 commitPositions 合并为一条撤销记录 */
   private arrangeStarts = new Map<string, { x: number; y: number }>();
+  /** 会话涉及的包裹容器起始几何：排列改变子元素位置 → 容器贴合，撤销时一并还原 */
+  private arrangeWrapStarts = new Map<string, GeometrySnapshot>();
   private arrangeTimer: number | null = null;
   /** 环形排列的圆心：进入环形模式时按当前布局拟合，之后沿用（见 resolveRingCenter） */
   private arrangeRingCenter: { x: number; y: number } | null = null;
@@ -552,6 +570,7 @@ export class CanvasApp {
     if (nodes.length < 2) return;
     if (!this.arrangeStarts.size) {
       for (const n of nodes) this.arrangeStarts.set(n.id, { x: n.x, y: n.y });
+      this.arrangeWrapStarts = wrapStartRecords(this.doc, nodes.map((n) => n.id));
     }
     // 容器与其子节点同时被选中时，子节点跟随容器平移；线类节点（箭头/直线）也不占排位
     // —— 它们的包围盒不表示形状，绑定箭头的位置由两端元素推导（参与排位会把真实元素挤乱）
@@ -604,6 +623,8 @@ export class CanvasApp {
         n.x += dx;
         n.y += dy;
       }
+      // 包裹容器随排布后的内容贴合（内层先于外层）
+      fitWrapAround(this.doc, nodes.map((n) => n.id));
     });
     if (this.arrangeTimer) window.clearTimeout(this.arrangeTimer);
     this.arrangeTimer = window.setTimeout(() => {
@@ -615,7 +636,9 @@ export class CanvasApp {
   /** 结束排列会话：落一条撤销记录；与起点一致（无实际位移）不入栈 */
   private arrangeCommit(): void {
     const starts = this.arrangeStarts;
+    const wrapStarts = this.arrangeWrapStarts;
     this.arrangeStarts = new Map();
+    this.arrangeWrapStarts = new Map();
     if (!starts.size) return;
     let moved = false;
     for (const [id, s] of starts) {
@@ -625,7 +648,15 @@ export class CanvasApp {
         break;
       }
     }
-    if (moved) this.doc.commitPositions('排列', starts);
+    if (!moved) return;
+    // 包裹容器的贴合几何并入同一条撤销记录（内容没动时贴合也不会变，无需单独判断）
+    const allStarts = new Map(starts);
+    const sizes = new Map<string, ResizeStartRecord>();
+    for (const [cid, rec] of wrapStarts) {
+      if (!allStarts.has(cid)) allStarts.set(cid, { x: rec.x, y: rec.y });
+      sizes.set(cid, rec);
+    }
+    this.doc.commitPositions('排列', allStarts, sizes.size ? sizes : undefined);
   }
 
   deleteSelection(): void {
@@ -789,6 +820,42 @@ export class CanvasApp {
     decomposeContainer(this.doc, containerId);
   }
 
+  // ---------- 容器包裹模式 ----------
+
+  /**
+   * 批量开关容器包裹模式（属性面板）。开启时立即按「当前子元素包围盒 + 内边距」贴合，
+   * 与字段写入在同一 mutate 内 —— 开关本身也是一步撤销；关闭时保持当前几何。
+   */
+  setContainersWrap(ids: string[], on: boolean): void {
+    const patches = new Map<string, Partial<CanvasNode>>();
+    for (const id of ids) {
+      const c = this.doc.getNode(id);
+      if (!c || c.type !== 'trefoil/container') continue;
+      const patch: Partial<CanvasNode> = { wrapMode: on };
+      if (on) {
+        const box = wrapBoxFor(this.doc.containerChildren(id), wrapPadOf(c));
+        if (box) Object.assign(patch, { x: box.x, y: box.y, width: box.width, height: box.height });
+      }
+      patches.set(id, patch);
+    }
+    if (patches.size) this.doc.updateNodes(patches, on ? '开启包裹模式' : '关闭包裹模式');
+  }
+
+  /**
+   * 连续调整选中容器的包裹内边距（滑块 / 滚轮 / 数字框）：实时生效并同帧贴合，
+   * 停顿后由 liveStyleMulti 的样式会话合并为一条撤销记录（容器几何一并还原）。
+   */
+  liveWrapPadding(pad: number): void {
+    const ids = [...this.doc.selection].filter((id) => {
+      const n = this.doc.getNode(id);
+      return n && isWrapContainer(n);
+    });
+    if (!ids.length) return;
+    const v = Math.max(0, Math.round(pad));
+    const patches = new Map<string, Partial<CanvasNode>>(ids.map((id) => [id, { wrapPadding: v }]));
+    this.liveSelectionPatches(patches, '包裹内边距');
+  }
+
   // ---------- 上下文菜单 ----------
 
   openContextMenuAt(sx: number, sy: number, wx: number, wy: number, pick: PickResult): void {
@@ -812,7 +879,7 @@ export class CanvasApp {
 
   private scheduleSave(): void {
     if (this.saveTimer) window.clearTimeout(this.saveTimer);
-    this.saveTimer = window.setTimeout(() => this.flushSave(), 400);
+    this.saveTimer = window.setTimeout(() => void this.flushSave(), 400);
   }
 
   async flushSave(): Promise<void> {
@@ -887,6 +954,15 @@ export class CanvasApp {
     this.engine.setCanvasBgColor(this.background.color);
   }
 
+  /** 连线设置同步到几何核心（双端绑定线形态 曲线/直线 + 端点模式 智能/手动）；
+   *  切换后重渲让已有绑定箭头立即生效，手动端点模式的锁定边由渲染同步（syncBoundArrow）补齐 */
+  applyLinkStyle(): void {
+    const shapeChanged = setBoundArrowShape(this.settings.link.boundShape);
+    const modeChanged = setEndpointMode(this.settings.link.endpointMode);
+    if (!shapeChanged && !modeChanged) return;
+    this.engine.render();
+  }
+
   /** 状态栏主题切换入口：夜间 → 跟随系统 → 日间 → 夜间 */
   cycleTheme(): void {
     this.settings.theme = this.settings.theme === 'dark' ? 'system' : this.settings.theme === 'system' ? 'light' : 'dark';
@@ -933,7 +1009,7 @@ export class CanvasApp {
       this.arrangeTimer = null;
     }
     this.arrangeCommit();
-    this.flushSave();
+    void this.flushSave();
     for (const d of this.disposers) d();
     this.disposers = [];
     this.tools?.destroy();

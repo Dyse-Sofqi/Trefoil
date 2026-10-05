@@ -79,9 +79,27 @@ export interface CanvasNode {
   headStyle?: ArrowHeadStyle;
   /** 箭头起点样式；缺省 none，设置后即为双向箭头 */
   tailStyle?: ArrowHeadStyle;
-  /** 端点磁吸绑定（仅两点直线/箭头）：起点/终点吸附到的元素 id，端点随元素移动；双端绑定渲染为贝塞尔曲线 */
+  /** 端点磁吸绑定（仅两点直线/箭头）：起点/终点吸附到的元素 id，端点随元素移动；双端绑定按 boundShape 渲染为曲线或直线 */
   fromNode?: string;
   toNode?: string;
+  /**
+   * 双端绑定线的连接形态覆盖（仅线类节点）：'curve' 贝塞尔曲线 / 'line' 直线。
+   * 未设置 = 跟随全局设置 link.boundShape；设置后该箭头不再随全局切换。
+   */
+  boundShape?: 'curve' | 'line';
+  /**
+   * 端点手动模式锁定的边（仅两点线的绑定端）：手动模式下锚点固定在该边中点，不随
+   * 另一端方位 / 两元素相对位置自动绕边（智能端点模式忽略此字段，按方位实时推断）。
+   * 缺省时手动模式回退智能推断（旧文件兼容），渲染同步时会自动补齐。
+   */
+  fromSide?: Side;
+  toSide?: Side;
+  /**
+   * 端点模式按元素覆盖（属性面板设置）：undefined = 跟随全局 link.endpointMode，
+   * 设置后该线的选边行为不再随全局切换。'manual' 时 fromSide/toSide 生效（缺省边
+   * 由渲染同步冻结补齐），'smart' 时按方位实时推断（忽略锁定边）。
+   */
+  endpointMode?: 'smart' | 'manual';
   /** 关系描述文本（线类形状）：画在线段中点，双击线段编辑 */
   label?: string;
   /** 线型（线类形状）：实线 solid（缺省）/ 虚线 dashed / 点状线 dotted */
@@ -94,6 +112,14 @@ export interface CanvasNode {
   // ---- 容器归属 ----
   /** 所属容器 id（容器内部节点；删除容器时转为自由元素） */
   containerId?: string | null;
+  // ---- 容器包裹模式（仅 trefoil/container） ----
+  /**
+   * 包裹模式：容器几何由内部元素推导 —— 尺寸始终等于子元素包围盒外扩 wrapPadding，
+   * 子元素移动 / 缩放时实时跟随。关闭后保持当前几何，恢复手动调整。
+   */
+  wrapMode?: boolean;
+  /** 包裹模式内边距（世界 px，≥0）：最外层子元素与容器边框的距离；缺省 CONTAINER_DEFAULT_WRAP_PAD */
+  wrapPadding?: number;
   // ---- 绑定组 ----
   groupId?: string | null;
   // ---- 导图 ----
@@ -133,6 +159,8 @@ export const isContainerNode = (n: CanvasNode) => n.type === NODE_TYPE_CONTAINER
 /** 线类节点（直线/箭头/折线）：几何由 points 决定，不是由包围盒决定的「块状元素」 */
 export const isLineLike = (n: { type: string; shape?: string }) =>
   n.type === NODE_TYPE_SHAPE && (n.shape === 'line' || n.shape === 'arrow' || n.shape === 'polyline');
+/** 闭合图形（矩形/椭圆/菱形/三角）：支持内嵌文字，双击进入编辑（线类的文字走 label 关系描述） */
+export const isClosedShape = (n: { type: string; shape?: string }) => n.type === NODE_TYPE_SHAPE && !isLineLike(n);
 
 /**
  * 块状元素（文本/图片/非线类形状）可旋转：围绕自身中心，内容整体跟随。

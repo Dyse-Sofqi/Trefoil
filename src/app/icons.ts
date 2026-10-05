@@ -49,6 +49,7 @@ const ICONS: Record<string, string> = {
   monitor: wrap('<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>'),
   'circle-question-mark': wrap('<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3"/><path d="M12 17h.01"/>'),
   'scan-square': wrap('<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="8" y="8" width="8" height="8" rx="1"/>'),
+  pipette: wrap('<path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z"/>'),
 };
 
 /** 内部图标名 → Obsidian lucide 图标名 */
@@ -79,6 +80,7 @@ const OBSIDIAN_ICON: Record<string, string> = {
   'v-bottom': 'align-end-vertical',
   'chevron-right': 'chevron-right',
   'chevron-left': 'chevron-left',
+  pipette: 'pipette',
   image: 'image',
 };
 

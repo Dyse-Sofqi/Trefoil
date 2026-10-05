@@ -1,13 +1,16 @@
 /**
  * 线类节点（直线/箭头）的端点绑定：fromNode / toNode 指向被磁吸连接的元素 id。
  * - 绑定端随元素移动（每次渲染前 syncBoundArrow 把锚点写回折点与包围盒）；
- * - 双端绑定 → 渲染为三次贝塞尔曲线（arrowCurve，与拓扑连线同款曲线美学）；
- *   锚点选边与渲染同源（inferSides），包围盒覆盖曲线控制点 —— 折点/选中框与实体不分离；
+ * - 双端绑定 → 按 boundShape 渲染为三次贝塞尔曲线（arrowCurve，与拓扑连线同款曲线美学）
+ *   或直线（全局缺省走设置面板「连线」，节点级 boundShape 可单独覆盖）；
+ *   锚点选边与渲染同源（boundSides），包围盒覆盖曲线控制点 —— 折点/选中框与实体不分离；
+ * - 端点模式（设置面板「连线」）：smart 智能端点按方位自动绕边；manual 手动端点
+ *   锁定在磁吸时选中的边（fromSide/toSide），两元素四边锚点可任意匹配连接；
  * - 被连接元素删除 → 端点冻结为直线（freezeBoundArrows）。
  * 只支持两点线（绑定仅在创建时的两点箭头/直线上产生，折线不参与）。
  */
-import { bezierPath, inferSides, nodeRect, segmentIntersectsRect, sideAnchor, type Rect, type Vec } from './geometry';
-import type { CanvasNode } from './types';
+import { bezierPath, inferSides, nearestRectSide, nodeRect, segmentIntersectsRect, sideAnchor, type Rect, type Vec } from './geometry';
+import type { CanvasNode, Side } from './types';
 
 type NodeGetter = (id: string) => CanvasNode | undefined;
 
@@ -30,21 +33,62 @@ function twoPointWorld(n: CanvasNode): [Vec, Vec] {
 
 /** 绑定端的锚点：取目标矩形上朝向另一端最近的边中点（端点随位置自动绕到最近的边） */
 export function anchorToward(target: CanvasNode, toward: Vec): Vec {
-  const r = nodeRect(target);
-  const dl = Math.abs(toward.x - r.x);
-  const dr = Math.abs(toward.x - (r.x + r.width));
-  const dt = Math.abs(toward.y - r.y);
-  const db = Math.abs(toward.y - (r.y + r.height));
-  const min = Math.min(dl, dr, dt, db);
-  const side = min === dl ? 'left' : min === dr ? 'right' : min === dt ? 'top' : 'bottom';
-  return sideAnchor(r, side);
+  return sideAnchor(nodeRect(target), nearestRectSide(nodeRect(target), toward));
+}
+
+// ---------- 端点模式（智能 / 手动，全局运行时状态） ----------
+
+/**
+ * 端点模式（运行时全局）：'smart' 智能端点（默认）——绑定端锚点随另一端方位 /
+ * 两元素相对位置自动绕到最近的边；'manual' 手动端点——端点锁定在磁吸时选中的边
+ * （fromSide/toSide），不再自动调整。由应用层从设置面板同步（setEndpointMode）。
+ */
+export type EndpointMode = 'smart' | 'manual';
+
+let endpointMode: EndpointMode = 'smart';
+
+/** 同步端点模式；返回是否发生变化（无变化时调用方可跳过重渲） */
+export function setEndpointMode(m: EndpointMode): boolean {
+  if (endpointMode === m) return false;
+  endpointMode = m;
+  return true;
+}
+
+/** 当前是否为手动端点模式（创建/重绑路径据此决定是否把磁吸选中的边写进节点） */
+export function isManualEndpoints(): boolean {
+  return endpointMode === 'manual';
+}
+
+/** 节点级端点模式覆盖的生效值：节点未设置时跟随全局（与 boundShape 的「节点覆盖 > 全局」同规则） */
+export function effectiveEndpointMode(n: CanvasNode): EndpointMode {
+  return n.endpointMode ?? endpointMode;
+}
+
+/**
+ * 双端绑定选边（与渲染单一同源）：手动端点模式用节点上锁定的边（缺省的那端回退
+ * 智能推断，兼容旧数据），智能端点模式按两矩形相对位置实时推断。
+ */
+function boundSides(n: CanvasNode, fr: Rect, tr: Rect): { fromSide: Side; toSide: Side } {
+  if (effectiveEndpointMode(n) === 'manual' && (n.fromSide || n.toSide)) {
+    const smart = inferSides(fr, tr);
+    return { fromSide: n.fromSide ?? smart.fromSide, toSide: n.toSide ?? smart.toSide };
+  }
+  return inferSides(fr, tr);
+}
+
+/** 绑定端锚点：智能端点模式按另一端方位自动绕边；手动端点模式固定在锁定的边（缺省回退智能绕边） */
+function manualAnchor(n: CanvasNode, which: 'from' | 'to', target: CanvasNode, toward: Vec): Vec {
+  if (effectiveEndpointMode(n) !== 'manual') return anchorToward(target, toward);
+  const side = which === 'from' ? n.fromSide : n.toSide;
+  return side ? sideAnchor(nodeRect(target), side) : anchorToward(target, toward);
 }
 
 /**
  * 箭头的有效端点：绑定端取目标元素锚点，自由端取折点。
- * 双端绑定 → 与渲染端 arrowCurve 完全同源（inferSides 选边）：折点、包围盒、选中框
+ * 双端绑定 → 与渲染端 arrowCurve 完全同源（boundSides 选边）：折点、包围盒、选中框
  * 必须与画出来的曲线严丝合缝，否则「实体和边框不在同一位置」。
- * 单端绑定 → 绑定端朝向自由端取最近边；绑定目标不存在时按自由端处理（自愈）。
+ * 智能端点模式 → 锚点随方位自动绕边；手动端点模式 → 锁定在 fromSide/toSide 指定的边。
+ * 单端绑定 → 绑定端朝向自由端取最近边（手动模式取锁定边）；绑定目标不存在时按自由端处理（自愈）。
  */
 export function effectiveEndpoints(n: CanvasNode, get: NodeGetter): { a: Vec; b: Vec } {
   const [p0, p1] = twoPointWorld(n);
@@ -53,19 +97,44 @@ export function effectiveEndpoints(n: CanvasNode, get: NodeGetter): { a: Vec; b:
   if (f && t) {
     const fr = nodeRect(f);
     const tr = nodeRect(t);
-    const sides = inferSides(fr, tr);
+    const sides = boundSides(n, fr, tr);
     return { a: sideAnchor(fr, sides.fromSide), b: sideAnchor(tr, sides.toSide) };
   }
   let a = p0;
   let b = p1;
-  if (f) a = anchorToward(f, p1);
-  if (t) b = anchorToward(t, p0);
+  if (f) a = manualAnchor(n, 'from', f, p1);
+  if (t) b = manualAnchor(n, 'to', t, p0);
   return { a, b };
 }
 
-/** 双端绑定是否成立（两端都指向现存元素）——成立时渲染为三次贝塞尔 */
+// ---------- 双端绑定线的形态（节点覆盖 > 全局渲染样式） ----------
+
+export type BoundShape = 'curve' | 'line';
+
+/**
+ * 双端绑定线的缺省形态（运行时全局）：'curve' 三次贝塞尔（默认）/ 'line' 直线。
+ * 由应用层从设置面板同步（setBoundArrowShape）；渲染、命中、框选、导出、标签中点
+ * 全部经 arrowCurve / isBoundCurve 单一漏斗取值 —— 直线形态下 arrowCurve 返回 null，
+ * 各消费方自然回落到折点直线几何，无需各自感知样式。
+ * 节点级 boundShape 字段可单独覆盖全局（属性面板「连接形态」），未设置时跟随全局。
+ */
+let boundShape: BoundShape = 'curve';
+
+/** 同步双端绑定线的全局缺省形态；返回是否发生变化（无变化时调用方可跳过重渲） */
+export function setBoundArrowShape(s: BoundShape): boolean {
+  if (boundShape === s) return false;
+  boundShape = s;
+  return true;
+}
+
+/** 双端绑定线的生效形态：节点 boundShape 覆盖优先，未设置跟随全局 */
+function effectiveBoundShape(n: CanvasNode): BoundShape {
+  return n.boundShape ?? boundShape;
+}
+
+/** 双端绑定是否按曲线渲染（两端都指向现存元素，且生效形态为曲线） */
 export function isBoundCurve(n: CanvasNode, get: NodeGetter): boolean {
-  return !!n.fromNode && !!n.toNode && !!get(n.fromNode!) && !!get(n.toNode!);
+  return effectiveBoundShape(n) === 'curve' && !!n.fromNode && !!n.toNode && !!get(n.fromNode!) && !!get(n.toNode!);
 }
 
 export interface ArrowCurve {
@@ -75,15 +144,16 @@ export interface ArrowCurve {
   startTangent: Vec;
 }
 
-/** 双端绑定的三次贝塞尔曲线（与拓扑连线同款：锚点在边缘中点，控制点沿法向张力 0.4） */
+/** 双端绑定的三次贝塞尔曲线（与拓扑连线同款：锚点在边缘中点，控制点沿法向张力 0.4）；直线形态返回 null */
 export function arrowCurve(n: CanvasNode, get: NodeGetter): ArrowCurve | null {
+  if (effectiveBoundShape(n) === 'line') return null;
   if (!n.fromNode || !n.toNode) return null;
   const f = get(n.fromNode);
   const t = get(n.toNode);
   if (!f || !t) return null;
   const fr = nodeRect(f);
   const tr = nodeRect(t);
-  const sides = inferSides(fr, tr);
+  const sides = boundSides(n, fr, tr);
   const a = sideAnchor(fr, sides.fromSide);
   const b = sideAnchor(tr, sides.toSide);
   const { path, endTangent } = bezierPath(a, sides.fromSide, b, sides.toSide);
@@ -96,7 +166,10 @@ export function arrowCurve(n: CanvasNode, get: NodeGetter): ArrowCurve | null {
 
 /**
  * 渲染前同步：把绑定端的锚点写回折点，并把包围盒收紧到两端点（其余数据随两端重排）。
- * 单端绑定 → 折点记录直线两端；双端绑定 → 折点记录曲线两端弦（渲染仍走贝塞尔）。
+ * 单端绑定 → 折点记录直线两端；双端绑定 → 折点记录曲线两端弦（曲线形态渲染走贝塞尔，
+ * 直线形态 arrowCurve 返回 null，包围盒与渲染都退化为两端锚点的连线）。
+ * 手动端点模式 → 为缺省锁定边的绑定端补齐当前推断的边（幂等）：智能/手动模式切换、
+ * 撤销还原出无锁定边的绑定，都在下一次渲染时冻结到当时的锚点上，之后不再自动绕边。
  * 在渲染循环中调用（Document 变更后），不进撤销栈。
  */
 export function syncBoundArrow(n: CanvasNode, get: NodeGetter): void {
@@ -105,11 +178,27 @@ export function syncBoundArrow(n: CanvasNode, get: NodeGetter): void {
   if (n.fromNode && !get(n.fromNode)) n.fromNode = undefined;
   if (n.toNode && !get(n.toNode)) n.toNode = undefined;
   if (!n.fromNode && !n.toNode) return;
+  if (effectiveEndpointMode(n) === 'manual') bakeManualSide(n, get);
   const { a, b } = effectiveEndpoints(n, get);
   // 双端绑定的贝塞尔会拱出弦包围盒：包围盒必须覆盖控制点（凸包性），
   // 否则多选选中框 / 框选范围只贴着两端锚点的连线，与画出来的弧线错位。
   const curve = arrowCurve(n, get);
   applyBoundBox(n, a, b, curve?.path ?? null);
+}
+
+/** 手动端点模式补齐缺省的锁定边：按当前智能推断的锚点固化为 fromSide/toSide（幂等，只补缺省） */
+function bakeManualSide(n: CanvasNode, get: NodeGetter): void {
+  const [p0, p1] = twoPointWorld(n);
+  const f = n.fromNode ? get(n.fromNode) : undefined;
+  const t = n.toNode ? get(n.toNode) : undefined;
+  if (f && t) {
+    const sides = inferSides(nodeRect(f), nodeRect(t));
+    if (!n.fromSide) n.fromSide = sides.fromSide;
+    if (!n.toSide) n.toSide = sides.toSide;
+    return;
+  }
+  if (f && !n.fromSide) n.fromSide = nearestRectSide(nodeRect(f), p1);
+  if (t && !n.toSide) n.toSide = nearestRectSide(nodeRect(t), p0);
 }
 
 /**
@@ -153,6 +242,8 @@ export function freezeBoundArrow(n: CanvasNode, get: NodeGetter): void {
   bakeBoundArrowEndpoints(n, get);
   n.fromNode = undefined;
   n.toNode = undefined;
+  n.fromSide = undefined;
+  n.toSide = undefined;
 }
 
 /**
@@ -164,8 +255,14 @@ export function freezeBoundArrows(candidates: CanvasNode[], get: NodeGetter, rem
     if (!(n.fromNode || n.toNode)) continue;
     if (!(n.fromNode && removed.has(n.fromNode)) && !(n.toNode && removed.has(n.toNode))) continue;
     bakeBoundArrowEndpoints(n, get);
-    if (n.fromNode && removed.has(n.fromNode)) n.fromNode = undefined;
-    if (n.toNode && removed.has(n.toNode)) n.toNode = undefined;
+    if (n.fromNode && removed.has(n.fromNode)) {
+      n.fromNode = undefined;
+      n.fromSide = undefined;
+    }
+    if (n.toNode && removed.has(n.toNode)) {
+      n.toNode = undefined;
+      n.toSide = undefined;
+    }
   }
 }
 
@@ -217,7 +314,10 @@ export function sampleCubic(path: number[], steps = 12): number[] {
   return out;
 }
 
-/** 创建/重绑时端点磁吸：在 (wx,wy) 半径 r 内找最近的候选元素，返回其锚点与 id（四向最近边） */
+/**
+ * 创建/重绑时端点磁吸：在 (wx,wy) 半径 r 内找最近的候选元素，返回其锚点与 id（四向最近边）。
+ * side = 被吸附的边：手动端点模式下随绑定一并写入 fromSide/toSide，端点从此锁定该边。
+ */
 export function magnetAnchor(
   wx: number,
   wy: number,
@@ -225,18 +325,19 @@ export function magnetAnchor(
   candidates: CanvasNode[],
   visible: (id: string) => boolean,
   exclude?: string | Iterable<string> | null,
-): { id: string; x: number; y: number } | null {
+): { id: string; x: number; y: number; side: Side } | null {
   const excluded = exclude == null ? null : new Set(typeof exclude === 'string' ? [exclude] : exclude);
-  let best: { id: string; x: number; y: number } | null = null;
+  let best: { id: string; x: number; y: number; side: Side } | null = null;
   let bestD = r;
   for (const t of candidates) {
     if (excluded?.has(t.id) || !visible(t.id) || !isLinkableTarget(t)) continue;
     const rect: Rect = { x: t.x, y: t.y, width: t.width, height: t.height };
-    const a = anchorToward(t, { x: wx, y: wy });
+    const side = nearestRectSide(rect, { x: wx, y: wy });
+    const a = sideAnchor(rect, side);
     const d = Math.hypot(a.x - wx, a.y - wy);
     if (d <= bestD) {
       bestD = d;
-      best = { id: t.id, x: a.x, y: a.y };
+      best = { id: t.id, x: a.x, y: a.y, side };
     }
   }
   return best;

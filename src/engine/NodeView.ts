@@ -103,7 +103,7 @@ const TEXT_VISUAL_FIELDS: readonly string[] = [
 const CONTAINER_VISUAL_FIELDS: readonly string[] = ['text', 'width', 'height', 'fill', 'fillOpacity', 'borderRadius'];
 const FILE_VISUAL_FIELDS: readonly string[] = ['file', 'width', 'height', 'caption'];
 // 注意：points 按数组引用比较，调用方需整体替换数组（tools 均如此），不得原地 push
-const SHAPE_VISUAL_FIELDS: readonly string[] = ['shape', 'fill', 'stroke', 'strokeSize', 'width', 'height', 'points', 'flipX', 'flipY', 'headStyle', 'tailStyle', 'fromNode', 'toNode', 'label', 'strokeStyle'];
+const SHAPE_VISUAL_FIELDS: readonly string[] = ['shape', 'fill', 'stroke', 'strokeSize', 'width', 'height', 'points', 'flipX', 'flipY', 'headStyle', 'tailStyle', 'fromNode', 'toNode', 'boundShape', 'label', 'strokeStyle', 'text', 'color', 'fontFamily', 'fontSize', 'fontWeight', 'hAlign'];
 
 /** file 字段（库内路径）→ 可加载 URL；返回 null 表示宿主判定文件确实缺失 */
 export type FileUrlResolver = (raw: string) => string | null | undefined;
@@ -123,6 +123,10 @@ export class NodeView {
   private inner: Konva.Group = new Konva.Group();
   /** 文本绘制数据（仅文本节点） */
   private textDraw: TextDraw | null = null;
+  /** 闭合图形的内嵌文字形状（编辑时由引擎置 textHidden 只藏文字、保留图形本体） */
+  private shapeText: Konva.Shape | null = null;
+  /** 内嵌文字隐藏标志（sceneFunc 读取；重绘由引擎的 cull→batchDraw 保证） */
+  private textHidden = false;
   /** 容器名片（按 1/视口缩放反向缩放的组）与内部文字标签、底色块（节点局部坐标） */
   private plateGroup: Konva.Group | null = null;
   /** 图片描述牌（同样按 1/视口缩放反向缩放，挂在图片下沿） */
@@ -250,11 +254,17 @@ export class NodeView {
     this.group.visible(!hidden);
   }
 
+  /** 编辑内嵌文字时只藏文字（闭合图形本体保持可见，编辑覆盖层是透明的）；下一次绘制生效 */
+  setTextHidden(hidden: boolean): void {
+    this.textHidden = hidden;
+  }
+
   private rebuild(): void {
     this.snapshot(this.node);
     this.textRev++;
     this.group.destroyChildren();
     this.textDraw = null;
+    this.shapeText = null;
     this.plateGroup = null;
     this.captionGroup = null;
     this.plateTag = null;
@@ -665,6 +675,79 @@ export class NodeView {
       g.add(txt);
       this.inner.add(g);
     }
+
+    // 闭合图形的内嵌文字（双击图形写入）：挂 group 而非 inner —— 翻转只镜像几何，文字保持可读；
+    // 旋转作用在整个 group 上，文字随形状一起转
+    if (!isLineLike(n)) this.buildShapeText(n, w, h);
+  }
+
+  /** 闭合图形的内嵌文字：形状内水平/竖直居中，限宽换行；文字高于形状时上下对称溢出 */
+  private buildShapeText(n: CanvasNode, w: number, h: number): void {
+    const text = n.text ?? '';
+    if (!text.trim()) return;
+    const fontSize = n.fontSize ?? 16;
+    const family = n.fontFamily ?? 'system-ui, sans-serif';
+    const baseWeight = n.fontWeight ?? 400;
+    const layout = layoutText(text, Math.max(20, w - TEXT_PADDING * 2), fontSize, family, baseWeight);
+    const color = resolveColor(n.color, this.palette) ?? this.palette.text;
+    const align = n.hAlign ?? 'center';
+    // 竖直方向不设内边距下限：居中偏移可为负（溢出形状），与编辑覆盖层同一公式
+    const startY = (h - layout.height) / 2;
+    const lines: TextLineDraw[] = [];
+    let y = startY;
+    for (const line of layout.lines) {
+      const lineX = align === 'left' ? TEXT_PADDING : align === 'right' ? w - TEXT_PADDING - line.width : (w - line.width) / 2;
+      const segs: TextSegDraw[] = line.segs.map((seg) => ({
+        text: seg.text,
+        x: lineX + seg.x,
+        w: seg.w,
+        font: fontString(seg.run, fontSize, family, baseWeight),
+        fill: seg.run.code ? this.palette.accent : color,
+        strike: !!seg.run.strike,
+      }));
+      lines.push({ y, segs });
+      y += layout.lineHeight;
+    }
+    const baseFont = fontString({ text: '', bold: false, italic: false, code: false, strike: false }, fontSize, family, baseWeight);
+    const shift = -fontVerticalMetrics(baseFont).inkCenterOffset;
+    const draw: TextDraw = {
+      fontSize,
+      lineHeight: layout.lineHeight,
+      shift,
+      width: w,
+      height: h,
+      hasText: true,
+      color,
+      lines,
+      fill: null,
+      border: null,
+      cornerRadius: 0,
+    };
+    this.shapeText = new Konva.Shape({
+      listening: false,
+      sceneFunc: (ctx) => this.drawShapeText(ctx, draw),
+    });
+    this.group.add(this.shapeText);
+  }
+
+  /** 内嵌文字绘制：与文本节点同管线（位图缓存/矢量回退）；编辑中只藏文字，深缩放不画占位块（形状本体仍可辨） */
+  private drawShapeText(ctx: Konva.Context, d: TextDraw): void {
+    if (this.textHidden) return;
+    if (d.fontSize * this.scale < TEXT_BLOCK_MIN_PX) return;
+    const g = rawContext(ctx);
+    const raster = this.textRaster?.get(
+      this.node.id,
+      `${this.uid}:${this.textRev}`,
+      this.scale * this.drawRatio(g),
+      d.width,
+      d.height,
+      (target, k) => this.paintText(target, k, d),
+    );
+    if (raster) {
+      g.drawImage(raster.canvas, 0, 0, raster.canvas.width / raster.scale, raster.canvas.height / raster.scale);
+      return;
+    }
+    this.paintText(g, 1, d);
   }
 
   private buildArrow(n: CanvasNode, stroke: string, sw: number): void {

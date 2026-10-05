@@ -12,9 +12,11 @@ import { arrowCurve, isBoundCurve, sampleCubic, syncBoundArrow } from '../core/a
 import { bezierPath, mindmapEdgeCurve, inferSides, sideAnchor } from '../core/geometry';
 import { rectsIntersect, unionRect, lineHitTolerance, rectCenter, nodeTopCenter, type Rect, type Vec, nodeRect, rectContains } from '../core/geometry';
 import type { BackgroundSettings, LaserSettings } from '../core/defaults';
+import { isWrapContainer } from '../core/wrap';
 import type { Palette } from './palette';
 import { darkenColor } from './palette';
 import { NodeView, hitTestNode, pointsOf, type FileUrlResolver } from './NodeView';
+import { editingNodeVisibility } from './editVisibility';
 import { EdgeView } from './EdgeView';
 import { BackgroundRenderer } from './BackgroundRenderer';
 import { Overlay, type OverlayState } from './Overlay';
@@ -340,9 +342,14 @@ export class Engine {
       const v = this.nodeViews.get(n.id);
       if (!v) continue;
       v.setScale(this.vp.scale);
-      const hidden = this.isNodeHidden(n.id) || !rectsIntersect(nodeRect(n), viewRect);
-      v.setHidden(hidden);
-      if (!hidden) visibleIds.add(n.id);
+      // 编辑中的闭合图形只藏文字不藏本体（编辑覆盖层透明，形状要透出来）；
+      // 其余节点（如文本节点）**整体隐藏**，由编辑覆盖层全权呈现 —— 文本节点的
+      // 覆盖层自带背景/边框/文字，本体若仍可见就会与覆盖层叠成重影（见 editVisibility.ts）
+      const editing = n.id === this.editingNodeId;
+      const vis = editingNodeVisibility(n, editing, this.isNodeHidden(n.id), rectsIntersect(nodeRect(n), viewRect));
+      v.setHidden(vis.hidden);
+      v.setTextHidden(vis.textHidden);
+      if (!vis.hidden || editing) visibleIds.add(n.id);
     }
     for (const [id, v] of this.edgeViews) {
       const e = this.doc.getEdge(id);
@@ -444,7 +451,13 @@ export class Engine {
           st.handles = null;
         } else {
           // 文本框高度由内容自适应：只保留四角缩放手柄（上下/左右中点手柄不出现）
-          st.handles = single.type === 'text' ? { ...nodeRect(single), cornerOnly: true } : nodeRect(single);
+          // 包裹容器：几何由内容推导（手动缩放会在下次内容变化时回弹），不提供缩放手柄，
+          // 尺寸经属性面板的包裹内边距调整
+          st.handles = single.type === 'text'
+            ? { ...nodeRect(single), cornerOnly: true }
+            : isWrapContainer(single)
+              ? null
+              : nodeRect(single);
         }
       }
     }

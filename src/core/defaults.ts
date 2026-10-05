@@ -123,6 +123,12 @@ export function textBorderDefaults(shape: ShapeDefaults) {
 export const CONTAINER_DEFAULT_RADIUS = 10;
 export const CONTAINER_DEFAULT_FILL_OPACITY = 0.1;
 
+/**
+ * 包裹模式默认内边距（世界 px）：与「组合为容器」的默认外边距一致 ——
+ * 组合出的容器开启包裹模式时几何不会跳变。取值规则同上两个字段（未设置时的回退值）。
+ */
+export const CONTAINER_DEFAULT_WRAP_PAD = 32;
+
 export interface ShapeDefaults {
   fill: string | null;
   stroke: string;
@@ -131,6 +137,18 @@ export interface ShapeDefaults {
   arrowHead: ArrowHeadStyle;
   /** 新建箭头/直线的起点样式默认值；非 none 即双向箭头 */
   arrowTail: ArrowHeadStyle;
+}
+
+/** 连线（双端磁吸绑定）设置 */
+export interface LinkSettings {
+  /** 双端绑定线（箭头/直线两端吸附到元素）的形态：'curve' 三次贝塞尔曲线（默认）/ 'line' 直线 */
+  boundShape: 'curve' | 'line';
+  /**
+   * 端点模式：'smart' 智能端点（默认）——绑定端锚点随另一端方位 / 两元素相对位置
+   * 自动绕到最近的边；'manual' 手动端点——端点只磁吸拖动时最近的边并锁定在该边，
+   * 之后不再自动调整，两元素四边锚点可任意匹配连接。
+   */
+  endpointMode: 'smart' | 'manual';
 }
 
 /** 鼠标悬停在数值控件上滚轮微调的步进设置 */
@@ -152,6 +170,7 @@ export interface TrefoilSettings {
   eraser: EraserSettings;
   text: TextSettings;
   shape: ShapeDefaults;
+  link: LinkSettings;
   wheelStep: WheelStepSettings;
   viewMode: ViewMode;
 }
@@ -202,6 +221,10 @@ export const DEFAULT_SETTINGS: TrefoilSettings = {
     strokeSize: 2,
     arrowHead: 'solid',
     arrowTail: 'none',
+  },
+  link: {
+    boundShape: 'curve',
+    endpointMode: 'smart',
   },
   wheelStep: {
     mode: 'auto',

@@ -4,7 +4,7 @@
  */
 import type { Rect } from './geometry';
 import { rectCenter } from './geometry';
-import type { SnapSettings } from './defaults';
+import type { BackgroundSettings, SnapSettings } from './defaults';
 
 export interface Guide {
   /** v：垂直线（对齐 X），h：水平线（对齐 Y） */
@@ -21,6 +21,16 @@ export interface SnapResult {
   dx: number;
   dy: number;
   guides: Guide[];
+}
+
+/**
+ * 网格吸附的实际间距：跟随可见背景 —— 点阵用点间距，网格用小格间距，
+ * 纯色沿用小格间距（隐形网格，保留对齐能力）。点阵渲染在 dotSpacing < 4 时
+ * 不画点（见 BackgroundRenderer），视为没有可见格子，回落小格间距。
+ */
+export function snapGridSpacing(bg: BackgroundSettings): number {
+  if (bg.mode === 'dots' && bg.dotSpacing >= 4) return bg.dotSpacing;
+  return bg.gridSpacing;
 }
 
 interface AxisCandidate {

@@ -51,6 +51,7 @@
     untrack(() => {
       if (app) {
         app.applyTheme();
+        app.applyLinkStyle();
         app.engine.laser.setSettings({ ...settings.laser });
         app.persistSettingsSoon();
       }

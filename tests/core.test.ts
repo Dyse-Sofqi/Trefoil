@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it } from 'vitest';
 import { parseInline } from '../src/core/mdInline';
 import { _setMeasureCtxForTests, autoTextHeight, autoTextWidth, layoutText } from '../src/engine/textMeasure';
-import { snapMove } from '../src/core/snap';
+import { snapMove, snapGridSpacing } from '../src/core/snap';
 import { normalizeRotation } from '../src/core/geometry';
 import { effectiveBackground, mergeSettings, textBorderDefaults, DEFAULT_SETTINGS, textStyleDefaults } from '../src/core/defaults';
 import { Document } from '../src/core/Document';
@@ -163,6 +163,19 @@ describe('吸附系统', () => {
     const result = snapMove({ x: 108, y: 100, width: 50, height: 50 }, [], off, 1, 24);
     expect(result.dx).toBe(0);
     expect(result.dy).toBe(0);
+  });
+
+  it('网格吸附间距跟随可见背景（snapGridSpacing）', () => {
+    const bg = (mode: 'solid' | 'dots' | 'grid', dotSpacing: number, gridSpacing: number) => ({
+      ...mergeSettings(DEFAULT_SETTINGS).background,
+      mode,
+      dotSpacing,
+      gridSpacing,
+    });
+    expect(snapGridSpacing(bg('dots', 40, 24))).toBe(40); // 点阵：吸附贴可见的点阵
+    expect(snapGridSpacing(bg('grid', 40, 24))).toBe(24); // 网格：贴小格间距
+    expect(snapGridSpacing(bg('solid', 40, 24))).toBe(24); // 纯色：沿用小格间距（隐形网格）
+    expect(snapGridSpacing(bg('dots', 2, 24))).toBe(24); // 点距过小不画点 → 回落小格间距
   });
 });
 

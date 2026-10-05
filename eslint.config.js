@@ -3,16 +3,22 @@ import obsidianmd from 'eslint-plugin-obsidianmd';
 import globals from 'globals';
 import { globalIgnores } from 'eslint/config';
 
-// 只保留 Obsidian 上架审核实际使用的规则（obsidianmd/* + no-unsanitized/*）。
-// 官方 recommended 预设还捆绑了 typescript-eslint 的 type-checked 全集，
-// 那批规则不属于审核范围，会把真正要修的问题淹没在噪音里。
+// Obsidian 上架审核（obsidian-release 自动扫描）实际会报的规则族：
+//   obsidianmd/*            插件 API / UI 文案 / manifest 规则
+//   no-unsanitized/*        innerHTML 等注入风险
+//   eslint-comments/*       disable 注释必须带说明、不得禁用受限规则（审核会报「Required」）
+//   @microsoft/sdl/*        document.write / innerHTML
+//   no-useless-escape       正则里多余的转义（审核报过「Unnecessary escape character」）
+// 官方 recommended 预设还捆了 typescript-eslint 的 type-checked 全集（no-unsafe-* /
+// no-unnecessary-type-assertion 等），那批不属于审核范围，会把真正要修的问题淹没在噪音里。
+const REVIEW_RULE_PREFIXES = ['obsidianmd/', 'no-unsanitized/', 'eslint-comments/', '@microsoft/sdl/'];
+const REVIEW_RULES = ['no-useless-escape'];
+const isReviewRule = (name) =>
+  REVIEW_RULE_PREFIXES.some((p) => name.startsWith(p)) || REVIEW_RULES.includes(name);
+
 const reviewBlocks = obsidianmd.configs.recommended.map((block) => ({
   ...block,
-  rules: Object.fromEntries(
-    Object.entries(block.rules ?? {}).filter(
-      ([name]) => name.startsWith('obsidianmd/') || name.startsWith('no-unsanitized/'),
-    ),
-  ),
+  rules: Object.fromEntries(Object.entries(block.rules ?? {}).filter(([name]) => isReviewRule(name))),
 }));
 
 export default tseslint.config(

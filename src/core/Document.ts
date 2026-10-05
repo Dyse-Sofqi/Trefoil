@@ -10,6 +10,7 @@ import type { CanvasDoc, CanvasEdge, CanvasNode, Side } from './types';
 import { uid } from './id';
 import type { Command } from './History';
 import { freezeBoundArrows } from './arrowLink';
+import { fitWrapAround, fitWrapContainers, collectWrapContainers, wrapStartRecords, type GeometrySnapshot } from './wrap';
 
 export interface DocEvents {
   changed: { live: boolean };
@@ -35,9 +36,14 @@ export interface ResizeStartRecord {
   rotation?: number;
   /** 线类节点（直线/箭头/折线）的折点快照：端点拖拽/缩放后 bbox 与 points 必须一起回滚 */
   points?: number[][];
-  /** 端点磁吸绑定快照：拖绑定端会解除绑定，撤销时需一并还原 */
+  /** 端点磁吸绑定快照：拖绑定端会解除绑定，撤销时需一并还原。
+   *  null = 快照时该端无绑定（tracked），undefined = 本会话未跟踪绑定（纯缩放等），
+   *  撤销/重做按 null 与值还原、按 undefined 跳过 —— 否则"拖开绑定端"的 redo 无法重新解绑。 */
   fromNode?: string | null;
   toNode?: string | null;
+  /** 端点手动模式锁定边快照：与 fromNode/toNode 同语义（null = 未锁定） */
+  fromSide?: Side | null;
+  toSide?: Side | null;
 }
 
 /** 连线（Edge）端点重绑的绑定快照：拖拽调整链接前后各存一份供撤销/重做 */
@@ -60,7 +66,13 @@ export class Document {
   /** 历史管理器由外部注入（CanvasApp 持有） */
   history?: { push(cmd: Command): void };
   /** 进行中的连续样式调整（滑块/滚轮），见 liveStyle/commitStyle */
-  private styleSession: { label: string; keys: (keyof CanvasNode)[]; before: Map<string, Partial<CanvasNode>> } | null = null;
+  private styleSession: {
+    label: string;
+    keys: (keyof CanvasNode)[];
+    before: Map<string, Partial<CanvasNode>>;
+    /** 会话涉及的包裹容器起始几何：子元素几何变化后容器自动贴合，撤销时一并还原 */
+    wrapBefore: Map<string, GeometrySnapshot>;
+  } | null = null;
 
   // ---------- 索引与查询 ----------
 
@@ -175,13 +187,17 @@ export class Document {
         if (n) before.set(id, pickProps(n, keys));
       }
       if (!before.size) return;
-      this.styleSession = { label, keys, before };
+      // includeSelf：补丁目标可能是包裹容器本身（改内边距），其几何也要进撤销快照
+      this.styleSession = { label, keys, before, wrapBefore: wrapStartRecords(this, patches.keys(), true) };
     }
+    // 补丁改了子元素几何（框宽高 / 包裹内边距）→ 包裹容器同帧贴合，保证始终包住内容
+    const affectsWrap = keys.some((k) => k === 'width' || k === 'height' || k === 'wrapPadding');
     this.live(() => {
       for (const [id, patch] of patches) {
         const n = this.getNode(id);
         if (n) Object.assign(n, patch);
       }
+      if (affectsWrap) fitWrapAround(this, patches.keys(), true);
     });
   }
 
@@ -197,6 +213,17 @@ export class Document {
       const now = n ? pickProps(n, s.keys) : before;
       after.set(id, now);
       if (!sameProps(before, now)) changed = true;
+    }
+    // 贴合产生的容器几何变化并入同一条撤销记录（applyProps 按条目各自的字段还原）。
+    // 注意与补丁字段合并而非覆盖 —— 补丁目标可能就是包裹容器本身（如改内边距）
+    for (const [id, before] of s.wrapBefore) {
+      const n = this.getNode(id);
+      const now: GeometrySnapshot | null = n ? { x: n.x, y: n.y, width: n.width, height: n.height } : null;
+      s.before.set(id, { ...s.before.get(id), ...before });
+      if (now) after.set(id, { ...after.get(id), ...now });
+      if (!now || now.x !== before.x || now.y !== before.y || now.width !== before.width || now.height !== before.height) {
+        changed = true;
+      }
     }
     if (!changed) return;
     const doc = this;
@@ -246,8 +273,11 @@ export class Document {
           flipY: n.flipY,
           rotation: n.rotation,
           points: n.points ? n.points.map((p) => [...p]) : undefined,
-          fromNode: n.fromNode,
-          toNode: n.toNode,
+          // null = 端状态无绑定/未锁定：redo 必须显式还原为无，而不是跳过
+          fromNode: n.fromNode ?? null,
+          toNode: n.toNode ?? null,
+          fromSide: n.fromSide ?? null,
+          toSide: n.toSide ?? null,
         });
       }
     }
@@ -268,8 +298,11 @@ export class Document {
               if (sz.flipY !== undefined) n.flipY = sz.flipY;
               if (sz.rotation !== undefined) n.rotation = sz.rotation;
               if (sz.points) n.points = sz.points.map((p) => [...p]);
+              // undefined = 会话未跟踪该字段（纯缩放等），跳过；null/值 = 还原为无/原绑定
               if (sz.fromNode !== undefined) n.fromNode = sz.fromNode ?? undefined;
               if (sz.toNode !== undefined) n.toNode = sz.toNode ?? undefined;
+              if (sz.fromSide !== undefined) n.fromSide = sz.fromSide ?? undefined;
+              if (sz.toSide !== undefined) n.toSide = sz.toSide ?? undefined;
             }
           }
         }),
@@ -286,8 +319,10 @@ export class Document {
             if (e.flipY !== undefined) n.flipY = e.flipY;
             if (e.rotation !== undefined) n.rotation = e.rotation;
             if (e.points) n.points = e.points.map((p) => [...p]);
-            if (e.fromNode !== undefined) n.fromNode = e.fromNode || undefined;
-            if (e.toNode !== undefined) n.toNode = e.toNode || undefined;
+            n.fromNode = e.fromNode || undefined;
+            n.toNode = e.toNode || undefined;
+            n.fromSide = e.fromSide || undefined;
+            n.toSide = e.toSide || undefined;
           }
         }),
     };
@@ -306,6 +341,8 @@ export class Document {
 
   removeNodes(ids: Iterable<string>): void {
     const set = new Set(ids);
+    // 删除前先收集涉及的包裹容器：删除后子节点已不在索引里，无法再沿 containerId 上溯
+    const wrapContainers = collectWrapContainers(this, set);
     this.mutate('删除', () => {
       const removedContainers = new Set(
         this.nodes.filter((n) => set.has(n.id) && n.type === 'trefoil/container').map((n) => n.id),
@@ -323,6 +360,8 @@ export class Document {
         }
       }
       this.reindex();
+      // 包裹容器随内容缩水并入同一条撤销记录（mutate 快照式，天然还原）
+      fitWrapContainers(this, wrapContainers);
       for (const id of set) this.selection.delete(id);
     });
   }

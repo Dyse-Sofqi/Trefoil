@@ -29,6 +29,8 @@ export default class TrefoilPlugin extends Plugin {
   private bodyObserver: MutationObserver | null = null;
   /** 最近一次观察到的深色状态（body class 是否含 theme-dark） */
   private lastThemeDark = false;
+  /** file-open 接管进行中（防止自身触发的 file-open 递归处理） */
+  private interceptingCanvasOpen = false;
 
   async onload(): Promise<void> {
     this.errorLogger = new ErrorLogger(this);
@@ -40,10 +42,11 @@ export default class TrefoilPlugin extends Plugin {
     this.registerView(VIEW_TYPE_TREFOIL, (leaf: WorkspaceLeaf) => new TrefoilView(leaf, this));
 
     // 点击 .canvas 文件 → 默认用 Trefoil 打开（本插件启用期间接管该扩展名）
-    this.registerExtensions(['canvas'], VIEW_TYPE_TREFOIL);
+    this.registerCanvasExtension();
 
-    // Ribbon：新建白板
-    this.addRibbonIcon('lucide-sprout', '新建 Trefoil 白板', () => {
+    // Ribbon：新建白板（🔍 审核规则 sentence-case / no-plugin-name：UI 文案不重复插件名，
+    // 命令面板与 Ribbon 提示里 Obsidian 已经展示了插件名）
+    this.addRibbonIcon('lucide-sprout', '新建白板', () => {
       void this.createNewCanvas();
     });
 
@@ -54,8 +57,9 @@ export default class TrefoilPlugin extends Plugin {
       callback: () => void this.createNewCanvas(),
     });
     this.addCommand({
-      id: 'open-active-in-trefoil',
-      name: '在 Trefoil 中打开当前画布',
+      // 🔍 审核规则 no-plugin-id-in-command-id：命令 id 不包含插件 id
+      id: 'open-active-canvas',
+      name: '打开当前画布',
       checkCallback: (checking: boolean) => {
         const file = this.app.workspace.getActiveFile();
         if (!file || file.extension !== 'canvas') return false;
@@ -133,12 +137,12 @@ export default class TrefoilPlugin extends Plugin {
       });
     }
 
-    // 文件菜单：在 Trefoil 中打开
+    // 文件菜单：打开白板视图
     this.registerEvent(
       this.app.workspace.on('file-menu', (menu: Menu, file: TAbstractFile) => {
         if (file instanceof TFile && file.extension === 'canvas') {
           menu.addItem((item) => {
-            item.setTitle('在 Trefoil 中打开').setIcon('lucide-sprout').onClick(() => void this.openCanvas(file));
+            item.setTitle('打开白板视图').setIcon('lucide-sprout').onClick(() => void this.openCanvas(file));
           });
         }
       }),
@@ -154,11 +158,57 @@ export default class TrefoilPlugin extends Plugin {
     this.bodyObserver?.disconnect();
     this.bodyObserver = null;
     if (this.rethemeRaf) {
-      cancelAnimationFrame(this.rethemeRaf);
+      window.cancelAnimationFrame(this.rethemeRaf);
       this.rethemeRaf = 0;
     }
     this.errorLogger?.uninstall();
     this.errorLogger = null;
+  }
+
+  /**
+   * 让 .canvas 文件默认用 Trefoil 打开。
+   *
+   * ⚠️ 必须容错：Obsidian 的扩展名注册表（`app.viewRegistry.typeByExtension`）是全局的，
+   * `ViewRegistry.registerExtensions` 遇到**已被注册**的扩展名会直接抛异常。
+   * 而 `.canvas` 默认由内置「Canvas」核心插件注册，核心插件又先于社区插件加载 ——
+   * 无条件注册必然抛错；异常从 onload 抛出后 Obsidian 会打印
+   * 「Plugin failure: <id>」并**自动禁用本插件**，用户侧表现为「装上就用不了」。
+   * 因此这里绝不能把异常放出去，也绝不能不判断就注册。
+   *
+   * 抢不到扩展名时退回 file-open 拦截：活动叶子里刚打开的 .canvas 文件由内置 Canvas
+   * 视图承载，就地把它换成 Trefoil 视图，接管效果与注册扩展名一致。
+   * 右键菜单「打开白板视图」始终保留，作为手动入口。
+   */
+  private registerCanvasExtension(): void {
+    try {
+      this.registerExtensions(['canvas'], VIEW_TYPE_TREFOIL);
+      return;
+    } catch {
+      // 已被占用（内置 Canvas 默认启用，也可能被其它插件先注册）
+      this.errorLogger?.log('info', '.canvas 扩展名已被占用，改用 file-open 接管');
+    }
+    this.registerEvent(
+      this.app.workspace.on('file-open', (file) => {
+        if (this.interceptingCanvasOpen) return;
+        if (!(file instanceof TFile) || file.extension !== 'canvas') return;
+        const leaf = this.app.workspace.getLeaf(false);
+        if (leaf.getViewState().type === VIEW_TYPE_TREFOIL) return;
+        // 只在「活动叶子正显示这个 .canvas 文件」时接管，避免误改其它标签页；
+        // 1.7.2+ 的延迟视图此刻可能还没加载，读不到 file，此时保持原样（用户可右键手动打开）
+        const view = leaf.view as unknown as { file?: unknown };
+        if (!(view.file instanceof TFile) || view.file.path !== file.path) return;
+        const state: TrefoilState = { file: file.path };
+        this.interceptingCanvasOpen = true;
+        void leaf
+          .setViewState({ type: VIEW_TYPE_TREFOIL, state })
+          .catch((err: unknown) => {
+            this.errorLogger?.log('error', `接管 .canvas 打开失败：${err instanceof Error ? err.message : String(err)}`);
+          })
+          .finally(() => {
+            this.interceptingCanvasOpen = false;
+          });
+      }),
+    );
   }
 
   /**
@@ -177,7 +227,7 @@ export default class TrefoilPlugin extends Plugin {
    */
   private scheduleRetheme(): void {
     if (this.rethemeRaf) return;
-    this.rethemeRaf = requestAnimationFrame(() => {
+    this.rethemeRaf = window.requestAnimationFrame(() => {
       this.rethemeRaf = 0;
       this.rethemeViews();
     });

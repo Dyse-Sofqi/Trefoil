@@ -75,7 +75,7 @@ export class TrefoilView extends ItemView {
     content.addClass('trefoil-view');
     const file = this.file;
     if (!file) {
-      content.setText('未指定画布文件：通过 Ribbon 图标或命令面板「新建白板」创建，或右键 .canvas 文件选择「在 Trefoil 中打开」。');
+      content.setText('未指定画布文件：通过 ribbon 图标或命令面板「新建白板」创建，或右键 .canvas 文件选择「打开白板视图」。');
       return;
     }
     this.adapter = new ObsidianAdapter(this.plugin, file);
@@ -114,7 +114,7 @@ export class TrefoilView extends ItemView {
       await this.plugin.saveTrefoilSettings();
     }
     if (this.svelteApp) {
-      unmount(this.svelteApp);
+      await unmount(this.svelteApp);
       this.svelteApp = null;
       this.canvasApp = null;
       this.adapter = null;

@@ -7,11 +7,12 @@
   import { arrangeTargets, fitRingRadius } from '../core/arrange';
   import type { ArrangeAnchor, ArrangeMode, RingDistribute, RingOrderBy } from '../core/arrange';
   import { resolveColor } from '../engine/palette';
-  import { FONT_PRESETS, CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS } from '../core/defaults';
+  import { FONT_PRESETS, CONTAINER_DEFAULT_FILL_OPACITY, CONTAINER_DEFAULT_RADIUS, CONTAINER_DEFAULT_WRAP_PAD } from '../core/defaults';
   import { isMapMember } from '../core/mindmap';
   import { wheelAdjust } from './wheelStep';
   import { autoTextHeight, autoTextWidth } from '../engine/textMeasure';
   import FontSelect from './FontSelect.svelte';
+  import ColorPicker from './ColorPicker.svelte';
 
   let { app }: { app: CanvasApp } = $props();
 
@@ -59,6 +60,22 @@
     return ref?.strokeStyle ?? 'solid';
   });
 
+  /** 双端绑定（曲线/直线形态仅对双端绑定线有意义）：全部选中线都双端绑定时才显示连接形态控件 */
+  const allBoundBoth = $derived(sel.length > 0 && sel.every((n) => !!n.fromNode && !!n.toNode));
+  /** 连接形态显示值（派生）：undefined = 跟随全局 link.boundShape */
+  const boundShapeVal = $derived.by(() => {
+    void ui.rev;
+    return ref?.boundShape ?? 'auto';
+  });
+
+  /** 端点模式对单端绑定线也有意义（锁定绑定端的边）：全部选中线至少一端绑定时显示 */
+  const allBoundAny = $derived(sel.length > 0 && sel.every((n) => !!n.fromNode || !!n.toNode));
+  /** 端点模式显示值（派生）：undefined = 跟随全局 link.endpointMode */
+  const endpointModeVal = $derived.by(() => {
+    void ui.rev;
+    return ref?.endpointMode ?? 'auto';
+  });
+
   /** 图片节点文件名（库内路径的 basename） */
   const fileName = $derived.by(() => {
     void ui.rev;
@@ -76,12 +93,14 @@
     return single?.caption === '';
   });
 
-  // ---- 颜色输入框的响应式 key/value ----
+  // ---- 颜色输入的响应式 value ----
   // 节点是原地修改的普通对象，模板里直接读 ref.fill 不会因取色变化而重渲染；
-  // 必须经由读取 ui.rev 的派生值，预设色点击后自定义色块才能立即同步。
-  const fillColorKey = $derived.by(() => {
+  // 必须经由读取 ui.rev 的派生值，取色预览/提交后触发钮与弹层才能立即同步。
+  // 取色统一走 ColorPicker 弹层：按压/拖动只预览（live），松手提交（合并为一条撤销记录）；
+  // 此前 {#key 包裹的原生 input[type=color] 会在每次取色时销毁重建、当场关掉系统弹窗。
+  const fillDisplay = $derived.by(() => {
     void ui.rev;
-    return ref ? (ref.fill ? resolveC(ref.fill) : '#ffffff') : '#ffffff';
+    return ref && ref.fill ? resolveC(ref.fill) : 'transparent';
   });
   const strokeColorKey = $derived.by(() => {
     void ui.rev;
@@ -91,6 +110,17 @@
     void ui.rev;
     return ref ? (resolveC(ref.color) ?? '#000000') : '#000000';
   });
+
+  /** 取色预览（按压 / 拖动中）：实时生效，并入进行中的样式会话，不入撤销栈 */
+  function previewColor(patch: Partial<CanvasNode>, label: string): void {
+    live(patch, label);
+  }
+
+  /** 取色提交（松手 / 吸管 / 回车）：与预览会话合并为一条撤销记录；值没变则不入栈 */
+  function commitColor(patch: Partial<CanvasNode>, label: string): void {
+    live(patch, label);
+    app.commitSelectionStyle();
+  }
 
   /** 提交图片描述：空 = 恢复默认文件名 */
   function commitCaption(raw: string): void {
@@ -123,8 +153,6 @@
       app.engine.invalidateImages();
     })();
   }
-
-  const presetColors = $derived(app.palette.presets);
 
   /**
    * 字号必须做成派生值：节点对象是原地修改的，直接读 ref.fontSize 时
@@ -201,6 +229,17 @@
   const containerRadius = $derived.by(() => {
     void ui.rev;
     return ref?.borderRadius ?? CONTAINER_DEFAULT_RADIUS;
+  });
+
+  /** 包裹模式开关显示值（派生） */
+  const wrapOn = $derived.by(() => {
+    void ui.rev;
+    return !!ref?.wrapMode;
+  });
+  /** 包裹内边距显示值（派生；未设置过 → 容器默认内边距） */
+  const wrapPad = $derived.by(() => {
+    void ui.rev;
+    return ref?.wrapPadding ?? CONTAINER_DEFAULT_WRAP_PAD;
   });
   let nameEl = $state<HTMLInputElement | null>(null);
 
@@ -287,6 +326,8 @@
   const BORDER_RADIUS_MAX = 48;
   /** 容器圆角上限：容器比文本框大得多，48 在几百像素的容器上几乎看不出圆角 */
   const CONTAINER_RADIUS_MAX = 160;
+  /** 包裹内边距上限（世界 px） */
+  const CONTAINER_WRAP_PAD_MAX = 400;
   const BORDER_STYLES: [BorderStyle, string][] = [
     ['solid', '实线'],
     ['dashed', '虚线'],
@@ -551,27 +592,31 @@
             }}
           />
         </label>
-        <label class="trefoil-row">
+        <div class="trefoil-row">
           <span class="trefoil-lab">颜色</span>
-          {#key textColorKey}
-            <input type="color" title="自定义颜色" value={textColorKey} oninput={(e) => apply({ color: e.currentTarget.value }, '颜色')} />
-          {/key}
-          {#each presetColors as c, i (i)}
-            <button class="trefoil-swatch" style:background={c} onclick={() => apply({ color: String(i + 1) }, '颜色')}></button>
-          {/each}
-        </label>
+          <ColorPicker
+            value={textColorKey}
+            onpreview={(c) => {
+              if (c !== null) previewColor({ color: c }, '颜色');
+            }}
+            oncommit={(c) => {
+              if (c !== null) commitColor({ color: c }, '颜色');
+            }}
+          />
+        </div>
         <div class="trefoil-row">
           <span class="trefoil-lab">边框</span>
           <button class="trefoil-mini-btn" class:active={borderOn} title="为文本框描出实体边框" onclick={toggleBorder}>实体边框</button>
           {#if borderOn && ref}
-            {#key 'b' + strokeColorKey}
-              <input
-                type="color"
-                title="边框颜色"
-                value={strokeColorKey}
-                oninput={(e) => apply({ stroke: e.currentTarget.value }, '边框颜色')}
-              />
-            {/key}
+            <ColorPicker
+              value={strokeColorKey}
+              onpreview={(c) => {
+                if (c !== null) previewColor({ stroke: c }, '边框颜色');
+              }}
+              oncommit={(c) => {
+                if (c !== null) commitColor({ stroke: c }, '边框颜色');
+              }}
+            />
           {/if}
         </div>
         {#if borderOn && ref}
@@ -638,14 +683,12 @@
         <div class="trefoil-row">
           <span class="trefoil-lab">填充</span>
           {#if ref}
-            {#key ref.fill ? resolveC(ref.fill) : '#ffffff'}
-              <input
-                type="color"
-                title="背景填充颜色"
-                value={ref.fill ? resolveC(ref.fill) : '#ffffff'}
-                oninput={(e) => apply({ fill: e.currentTarget.value }, '填充')}
-              />
-            {/key}
+            <ColorPicker
+              value={fillDisplay}
+              allowTransparent
+              onpreview={(c) => previewColor({ fill: c }, '填充')}
+              oncommit={(c) => commitColor({ fill: c }, '填充')}
+            />
             <button class="trefoil-mini-btn" class:active={!fillOn} title="无填充" onclick={() => apply({ fill: null }, '填充')}>无</button>
           {/if}
         </div>
@@ -682,27 +725,25 @@
       <div class="trefoil-sec">
         <div class="trefoil-row">
           <span class="trefoil-lab">填充</span>
-          {#key fillColorKey}
-            <input
-              type="color"
-              title="自定义颜色"
-              value={fillColorKey}
-              oninput={(e) => apply({ fill: e.currentTarget.value }, '填充')}
-            />
-          {/key}
-          {#each presetColors as c, i (i)}
-            <button class="trefoil-swatch" style:background={c} title="填充预设色 {i + 1}" onclick={() => apply({ fill: String(i + 1) }, '填充')}></button>
-          {/each}
+          <ColorPicker
+            value={fillDisplay}
+            allowTransparent
+            onpreview={(c) => previewColor({ fill: c }, '填充')}
+            oncommit={(c) => commitColor({ fill: c }, '填充')}
+          />
           <button class="trefoil-mini-btn" class:active={!ref.fill} onclick={() => apply({ fill: null }, '填充')}>无</button>
         </div>
         <div class="trefoil-row">
           <span class="trefoil-lab">描边</span>
-          {#key strokeColorKey}
-            <input type="color" title="自定义颜色" value={strokeColorKey} oninput={(e) => apply({ stroke: e.currentTarget.value }, '描边')} />
-          {/key}
-          {#each presetColors as c, i (i)}
-            <button class="trefoil-swatch" style:background={c} title="描边预设色 {i + 1}" onclick={() => apply({ stroke: String(i + 1) }, '描边')}></button>
-          {/each}
+          <ColorPicker
+            value={strokeColorKey}
+            onpreview={(c) => {
+              if (c !== null) previewColor({ stroke: c }, '描边');
+            }}
+            oncommit={(c) => {
+              if (c !== null) commitColor({ stroke: c }, '描边');
+            }}
+          />
           <input
             type="number"
             min="1"
@@ -759,6 +800,40 @@
               {/each}
             </div>
           </div>
+          {#if allBoundBoth}
+            <div class="trefoil-row">
+              <span class="trefoil-lab trefoil-lab-wide">连接形态</span>
+              <div class="trefoil-btn-group">
+                {#each [['auto', '跟随'], ['line', '直线'], ['curve', '曲线']] as [v, lab] (v)}
+                  <button
+                    class="trefoil-mini-btn"
+                    class:active={boundShapeVal === v}
+                    title={v === 'auto' ? `跟随全局设置（当前：${app.settings.link.boundShape === 'line' ? '直线' : '曲线'}）` : '仅影响这条线，优先于全局设置'}
+                    onclick={() => apply({ boundShape: v === 'auto' ? undefined : (v as CanvasNode['boundShape']) }, '连接形态')}
+                  >{lab}</button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+          {#if allBoundAny}
+            <div class="trefoil-row">
+              <span class="trefoil-lab trefoil-lab-wide">端点模式</span>
+              <div class="trefoil-btn-group">
+                {#each [['auto', '跟随'], ['smart', '智能'], ['manual', '手动']] as [v, lab] (v)}
+                  <button
+                    class="trefoil-mini-btn"
+                    class:active={endpointModeVal === v}
+                    title={v === 'auto'
+                      ? `跟随全局设置（当前：${app.settings.link.endpointMode === 'manual' ? '手动' : '智能'}）`
+                      : v === 'manual'
+                        ? '仅影响这条线：锚点锁定在磁吸选中的边，两元素四边锚点可任意匹配'
+                        : '仅影响这条线：锚点随另一端方位自动绕到最近的边'}
+                    onclick={() => apply({ endpointMode: v === 'auto' ? undefined : (v as CanvasNode['endpointMode']) }, '端点模式')}
+                  >{lab}</button>
+                {/each}
+              </div>
+            </div>
+          {/if}
         {/if}
         <label class="trefoil-row">
           <span class="trefoil-lab">透明度</span>
@@ -845,22 +920,12 @@
         </div>
         <div class="trefoil-row">
           <span class="trefoil-lab">背景</span>
-          {#key fillColorKey}
-            <input
-              type="color"
-              title="容器背景颜色"
-              value={fillColorKey}
-              oninput={(e) => apply({ fill: e.currentTarget.value }, '容器背景')}
-            />
-          {/key}
-          {#each presetColors as c, i (i)}
-            <button
-              class="trefoil-swatch"
-              style:background={c}
-              title="背景预设色 {i + 1}"
-              onclick={() => apply({ fill: String(i + 1) }, '容器背景')}
-            ></button>
-          {/each}
+          <ColorPicker
+            value={fillDisplay}
+            allowTransparent
+            onpreview={(c) => previewColor({ fill: c }, '容器背景')}
+            oncommit={(c) => commitColor({ fill: c }, '容器背景')}
+          />
           <button class="trefoil-mini-btn" class:active={!fillOn} title="无背景（只保留虚线边框）" onclick={() => apply({ fill: null }, '容器背景')}>无</button>
         </div>
         {#if fillOn}
@@ -907,6 +972,50 @@
             }}
           />
         </label>
+        <div class="trefoil-row">
+          <span class="trefoil-lab">包裹</span>
+          <button
+            class="trefoil-mini-btn"
+            class:active={wrapOn}
+            title="包裹模式：容器尺寸由内部元素推导，最外层元素始终与边框保持内边距；拖动元素向外扩张时容器跟随"
+            onclick={() => app.setContainersWrap(selContainers.map((c) => c.id), !wrapOn)}
+          >包裹模式</button>
+        </div>
+        {#if wrapOn}
+          <label class="trefoil-row">
+            <span class="trefoil-lab">内边距</span>
+            <input
+              type="range"
+              min="0"
+              max={CONTAINER_WRAP_PAD_MAX}
+              value={wrapPad}
+              use:wheelAdjust={{ kind: 'value' }}
+              oninput={(e) => app.liveWrapPadding(+e.currentTarget.value)}
+              onchange={() => app.commitSelectionStyle()}
+            />
+            <input
+              type="number"
+              min="0"
+              max={CONTAINER_WRAP_PAD_MAX}
+              value={wrapPad}
+              use:wheelAdjust={{ kind: 'value' }}
+              oninput={(e) => {
+                const raw = e.currentTarget.value.trim();
+                if (raw === '') return;
+                const v = Math.round(+raw);
+                if (Number.isFinite(v) && v >= 0 && v <= CONTAINER_WRAP_PAD_MAX) app.liveWrapPadding(v);
+              }}
+              onchange={(e) => {
+                const v = Math.max(0, Math.min(CONTAINER_WRAP_PAD_MAX, Math.round(+e.currentTarget.value) || 0));
+                app.liveWrapPadding(v);
+                app.commitSelectionStyle();
+              }}
+              onkeydown={(e) => {
+                if (e.key === 'Enter') e.currentTarget.blur();
+              }}
+            />
+          </label>
+        {/if}
         <div class="trefoil-row trefoil-row-actions">
           <button class="trefoil-mini-btn" onclick={() => app.decomposeContainer(single.id)}>拆解容器</button>
         </div>
@@ -1402,38 +1511,6 @@
     min-width: 0; /* 允许压缩到内容宽度以下，避免滑块+数字框撑出面板横向滚动条 */
     accent-color: var(--interactive-accent, #4c8dff);
   }
-  /* 原生取色器：Chromium 新版会把色块画成圆形，这里改写伪元素压成与预设色块同语言的圆角方 */
-  input[type='color'] {
-    width: 22px;
-    height: 22px;
-    flex: none;
-    padding: 0;
-    border: 1px solid var(--background-modifier-border, #ddd);
-    border-radius: 5px;
-    background: var(--background-primary, #fff);
-    cursor: pointer;
-    overflow: hidden;
-    transition: border-color 0.12s ease, box-shadow 0.12s ease;
-  }
-  input[type='color']:hover {
-    border-color: var(--interactive-accent, #4c8dff);
-  }
-  input[type='color']:focus-visible {
-    outline: none;
-    border-color: var(--interactive-accent, #4c8dff);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent, #4c8dff) 30%, transparent);
-  }
-  input[type='color']::-webkit-color-swatch-wrapper {
-    padding: 0;
-  }
-  input[type='color']::-webkit-color-swatch {
-    border: none;
-    border-radius: 4px;
-  }
-  input[type='color']::-moz-color-swatch {
-    border: none;
-    border-radius: 4px;
-  }
   .trefoil-mini-btn {
     padding: 3px 8px;
     border: 1px solid var(--background-modifier-border, #ddd);
@@ -1465,22 +1542,6 @@
   .trefoil-btn-group {
     display: flex;
     gap: 3px;
-  }
-  .trefoil-swatch {
-    width: 16px;
-    height: 16px;
-    border-radius: 4px;
-    border: 1px solid rgba(0, 0, 0, 0.15);
-    cursor: pointer;
-    padding: 0;
-    transition: transform 0.12s ease, box-shadow 0.12s ease;
-  }
-  .trefoil-swatch:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
-  }
-  .trefoil-swatch:active {
-    transform: none;
   }
   .trefoil-icon-btn {
     border: none;
