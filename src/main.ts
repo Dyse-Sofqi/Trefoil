@@ -4,6 +4,11 @@
  */
 import { Menu, Notice, Plugin, TAbstractFile, TFile, WorkspaceLeaf, getIcon, requireApiVersion } from 'obsidian';
 import { VIEW_TYPE_TREFOIL, TrefoilView } from './obsidian/TrefoilView';
+import {
+  releaseLeftoverCanvasMapping,
+  restoreBuiltinCanvasExtension,
+  viewRegistryOf,
+} from './obsidian/canvasExtension';
 import { createEmptyDocJson } from './data/jsonCanvas';
 import { ErrorLogger } from './obsidian/errorLog';
 import { setIconResolver } from './app/icons';
@@ -31,6 +36,8 @@ export default class TrefoilPlugin extends Plugin {
   private lastThemeDark = false;
   /** file-open 接管进行中（防止自身触发的 file-open 递归处理） */
   private interceptingCanvasOpen = false;
+  /** 本插件是否持有 .canvas 扩展名映射（禁用时要负责归还，详见 canvasExtension.ts） */
+  private canvasExtensionOwned = false;
 
   async onload(): Promise<void> {
     this.errorLogger = new ErrorLogger(this);
@@ -155,6 +162,18 @@ export default class TrefoilPlugin extends Plugin {
   }
 
   onunload(): void {
+    // 归还 .canvas 扩展名（放在最前面：errorLogger 还没被卸载，失败时有日志可查）。
+    // 不禁用时装着 .canvas 映射，禁用后若留作「无主」，Obsidian 会把文件交给操作系统默认
+    // 程序，而 .canvas 的系统默认关联就是 Obsidian 自己 —— 文件被反复交回，疯狂尝试打开。
+    // 归还给内置画布视图类型后，宿主显示稳定的「未知面板」占位，不再触发该乒乓。
+    if (this.canvasExtensionOwned) {
+      this.canvasExtensionOwned = false;
+      try {
+        restoreBuiltinCanvasExtension(viewRegistryOf(this.app), VIEW_TYPE_TREFOIL);
+      } catch (err) {
+        this.errorLogger?.log('error', `归还 .canvas 扩展名失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     this.bodyObserver?.disconnect();
     this.bodyObserver = null;
     if (this.rethemeRaf) {
@@ -178,10 +197,17 @@ export default class TrefoilPlugin extends Plugin {
    * 抢不到扩展名时退回 file-open 拦截：活动叶子里刚打开的 .canvas 文件由内置 Canvas
    * 视图承载，就地把它换成 Trefoil 视图，接管效果与注册扩展名一致。
    * 右键菜单「打开白板视图」始终保留，作为手动入口。
+   *
+   * 禁用时的归还记得看 onunload：不把 .canvas 留在无主状态（详见 canvasExtension.ts）。
    */
   private registerCanvasExtension(): void {
+    // 上次卸载时可能留下了「canvas → canvas」占位映射（内置画布不可用时的降级态）。
+    // 先摘除它，否则本次 registerExtensions 会因扩展名被占用而抛错，白白退化成
+    // file-open 接管；仅当内置画布不可用时才会真的摘（属于核心插件的映射不碰）。
+    releaseLeftoverCanvasMapping(viewRegistryOf(this.app));
     try {
       this.registerExtensions(['canvas'], VIEW_TYPE_TREFOIL);
+      this.canvasExtensionOwned = true;
       return;
     } catch {
       // 已被占用（内置 Canvas 默认启用，也可能被其它插件先注册）

@@ -6,6 +6,32 @@ All notable changes to Trefoil are documented here.
 
 ---
 
+## [1.0.5] - 2026-10-10
+
+修复禁用 Trefoil 后点击 `.canvas` 文件时 Obsidian「疯狂尝试打开」的问题。禁用插件时宿主会回收扩展名映射，`.canvas` 随之回到「无主」状态；此时点击文件，Obsidian 对无主扩展名的兜底逻辑是把文件交给操作系统默认程序，而 `.canvas` 的系统默认关联正是 Obsidian 自己 —— 文件被反复交回，控制台不停打印 `Received URL action`，形成停不下来的无限乒乓。现在插件卸载时会把映射归还给内置画布视图类型，宿主改为显示稳定的「未知面板」占位视图，不再把文件甩给操作系统。
+
+### 错误修复
+
+#### 禁用后的 .canvas 归属
+
+- **无限乒乓** — 见上。归还映射后，禁用期间点击 `.canvas` 文件得到的是幽灵图标的「未知面板」占位（This pane doesn't look like anything to me），不会再触发系统层反复打开。
+- **禁用 → 重启用循环** — 占位映射只在「内置画布视图不可用」时才会被摘除（属于内置 Canvas 核心插件的映射一律不碰），反复禁用 / 启用（含 hot-reload）行为一致，不会出现「重启用后抢注失败、退化成 file-open 接管」的回归。
+- **回归测试** — 新增 `tests/canvasExtension.test.ts` 15 例，覆盖占位摘除、映射归还、完整生命周期与两轮热重载；全套件 383 例通过，并做了变异验证（删掉「内置可用不碰」守卫即刻变红）。
+- **已知边界** — 禁用后若**重启 Obsidian**，扩展名注册表随进程重建、映射不复存在（禁用的插件根本不加载，没有机会注册）；该状态下请启用内置 Canvas 核心插件，或保持 Trefoil 启用。
+
+### 维护与规范
+
+- 根 tsconfig 全量 `tsc --noEmit` 通过；`eslint` 0 error（10 个 `prefer-create-el` warning 为 engine 旧文件既有，与本版本无关）。
+- `manifest.json` / `package.json` / `versions.json` 对齐 1.0.5。
+
+### English summary
+
+**Bug fixes**
+
+Disabling the plugin left the `canvas` extension unowned: Obsidian's fallback for extensions without a registered view type hands the file to the OS default program, and since `.canvas` is associated with Obsidian itself, the file bounced back and forth forever — the console filled with `Received URL action` until the plugin was re-enabled. On unload the extension is now returned to the built-in Canvas view type, so the host shows its stable "unknown pane" placeholder instead of handing the file to the operating system. The placeholder mapping is removed again on the next enable — but only when the built-in canvas view is unavailable, never when the mapping belongs to the core Canvas plugin — so repeated disable/enable cycles, hot-reload included, behave consistently. New regression tests (`tests/canvasExtension.test.ts`, 15 cases) cover placeholder removal, the extension hand-back, the full lifecycle and two hot-reload rounds; the suite passes at 383 tests, mutation-verified. One residual boundary: after disabling the plugin and restarting Obsidian, the in-memory extension registry is rebuilt and nothing registers `canvas` (a disabled plugin never loads) — in that state, enable the built-in Canvas core plugin or keep Trefoil enabled.
+
+---
+
 ## [1.0.4] - 2026-10-05
 
 一次以「结构化容器 + 可配置连线 + 形状内嵌文字」为主的版本：容器新增**包裹模式**（尺寸由内容推导、贴合并入单步撤销），闭合图形获得**内嵌文字**，连线获得**连接形态**与**端点模式**两项设置并支持逐条覆盖；同时重做取色弹层与设置面板，修复 `.canvas` 接管失败导致插件加载不了、文字编辑重影、端点绑定撤销等一批问题，并按 Obsidian 上架审核规范完成一轮复查。
